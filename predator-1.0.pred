@@ -1,0 +1,66 @@
+predator/1.0
+
+# comment is a '#' through to the end of the line
+comment: is_whitespace nospace '#' /.*$/;
+
+doctype: 'predator/1.0\n';
+
+name: /\b[A-Za-z_][A-Za-z_0-9]*\b/;
+
+literal: /'(\\['rnt\\]|[^'])*'/;
+word: /"\w+"/;
+regex: nospace '/' /(\\.|[^\/\r\n])+/ as regex_pattern '/';
+repeat:
+	"maybe"           # match exactly 0 or 1 of the following
+	or "many"         # match 1 or more
+	or "maybe" "many" # match 0 or more
+	;
+
+# the idea here is you use "as X" to put a sub-thing into the child named
+# "X", or you use "into Y" to append the child to the list of children
+# named "Y".
+alias1: "as" name;
+aliasn: "into" name;
+
+single:
+	# there could be a repeat on the front
+	maybe repeat as single_repeat
+	# must have a literal/word/regex or name to match on
+	(literal or regex or name or word) as single_what
+	# possibly have an alias on the end
+	maybe (alias1 or aliasn) as single_alias;
+
+# you can run many singles together as a sequence
+sequence: many single into sequence_items;
+
+choice:
+	(sequence or group) into choice_items
+	maybe many ("or" (sequence or group) into choice_items);
+group: maybe (repeat or "nospace") as group_opt '(' choice as group_inner ')';
+
+declaration:
+	name as decl_name ':'
+	# declaration may start with either the is_whitespace or is_leader options
+	maybe ("is_whitespace" or "is_leader") as decl_option
+	# you can also use the nospace option here
+	maybe "nospace" as decl_nospace
+	# the declaration ends with a single choice
+	choice as decl_choice
+	';'
+	;
+
+export: "export" many name into export_names ';';
+
+# syntax file will always start with 'predator/1.0'
+document:
+	is_leader
+	doctype as doc_doctype
+	body as doc_body
+	;
+
+body:
+	maybe many declaration into body_declarations
+	maybe many export into body_exports
+	;
+
+export document;
