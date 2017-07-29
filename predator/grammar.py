@@ -1,3 +1,5 @@
+import re
+
 from predator.common import WORD_RE, GrammarConstructionError
 
 
@@ -63,6 +65,28 @@ class Regex(Item):
     """
     A grammar object that matches text using a regular expression.
     """
+    def __init__(self, name, pattern):
+        import sre_constants
+
+        super().__init__(name)
+
+        self._pattern = pattern
+
+        if not len(pattern):
+            err = 'Regex cannot use an empty pattern'
+            raise GrammarConstructionError(err)
+
+        try:
+            self._regex = re.compile(pattern, re.MULTILINE)
+        except sre_constants.error as err:
+            msg = "Regex compilation failed: " + str(err)
+            raise GrammarConstructionError(msg)
+
+    def __repr__(self):
+        return '<{}{} /{}/>'.format(
+            self.__class__.__name__,
+            '[{}]'.format(self.item_name) if self.item_name else '',
+            self._regex.pattern)
 
 
 class Linebreak(Item):
