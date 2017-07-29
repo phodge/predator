@@ -2,6 +2,8 @@ import re
 
 from predator.common import WORD_RE, GrammarConstructionError
 
+LINEBREAK_ITEM_NAME = '__LINEBREAK__'
+
 
 class Item:
     """
@@ -94,6 +96,11 @@ class Linebreak(Item):
     A grammar object that matches newlines. A special item is needed because
     the input stream doesn't store newline characters.
     """
+    def __init__(self):
+        super().__init__(LINEBREAK_ITEM_NAME)
+
+    def __repr__(self):
+        return '<{}>'.format(self.__class__.__name__)
 
 
 class Choice(Item):
