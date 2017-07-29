@@ -150,7 +150,11 @@ def test_construct_regex():
 
 
 def test_construct_linebreak():
-    assert False, 'Test is unfinished'
+    from predator.grammar import Linebreak
+    # it takes no arguments
+    Linebreak()
+    # there's nothing exciting in the repr
+    _checkrepr(Linebreak(), [])
 
 
 def test_construct_choice():
