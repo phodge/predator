@@ -117,7 +117,36 @@ def test_construct_literal():
 
 
 def test_construct_regex():
-    assert False, 'Test is unfinished'
+    from predator.common import GrammarConstructionError
+    from predator.grammar import Regex
+
+    # things that do work
+    a_dot = Regex('a_dot', '.')
+    assert a_dot.item_name == 'a_dot'
+
+    nn = Regex(None, '(?:regex with no name)')
+    assert nn.item_name is None
+
+    # things that won't work
+    things_that_fail = (
+        # empty regex
+        '',
+        # something that isn't a valid regex
+        '*',
+    )
+
+    for badinput in things_that_fail:
+        try:
+            # symbols don't work
+            Regex(None, badinput)
+        except GrammarConstructionError:
+            pass
+        else:
+            err = 'Regex(None, {!r}) should have failed'.format(badinput)
+            raise Exception(err)
+
+    # make sure Literal has a nice repr
+    _checkrepr(Regex('many_As', 'A+'), ['many_As', 'A+'])
 
 
 def test_construct_linebreak():
