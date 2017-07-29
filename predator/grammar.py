@@ -1,3 +1,6 @@
+from predator.common import WORD_RE, GrammarConstructionError
+
+
 class Item:
     """
     Base class for grammar objects that matches text.
@@ -8,6 +11,17 @@ class Word(Item):
     """
     A grammar object that matches a whole word, respecting word boundaries.
     """
+    def __init__(self, word):
+        super().__init__()
+
+        if not WORD_RE.fullmatch(word):
+            err = 'Not a valid word: {!r}'.format(word)
+            raise GrammarConstructionError(err)
+
+        self._word = word
+
+    def __repr__(self):
+        return '<{} {}>'.format(self.__class__.__name__, self._word)
 
 
 class Literal(Item):
