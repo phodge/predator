@@ -4,6 +4,37 @@ grammar items using the predator.grammar.Item subclasses.
 """
 
 
+def test_item():
+    from predator.common import GrammarConstructionError
+    from predator.grammar import Item
+
+    # items can be constructed with no name
+    i = Item(None)
+    assert i.item_name is None
+
+    # items can be constructed with a name
+    i = Item('my_cool_item')
+    assert i.item_name == 'my_cool_item'
+
+    # some bad names that won't work
+    things_that_fail = (
+        # empty names
+        '',
+        # names that don't match WORD_RE
+        ' ',
+        '!bang',
+        ' wheeee',
+    )
+    for badname in things_that_fail:
+        try:
+            Item(badname)
+        except GrammarConstructionError:
+            pass
+        else:
+            err = 'Item name {!r} should have failed'.format(badname)
+            raise Exception(err)
+
+
 def test_construct_word():
     from predator.common import GrammarConstructionError
     from predator.grammar import Word
