@@ -38,6 +38,25 @@ class Literal(Item):
     """
     A grammar object that matches text equal to an exact string.
     """
+    def __init__(self, chars, *, name=None):
+        super().__init__(name)
+
+        if not len(chars):
+            err = 'A Literal cannot have an empty character list'
+            raise GrammarConstructionError(err)
+
+        if '\n' in chars or '\r' in chars:
+            err = 'Literal cannot be used to match "\\r" or "\\n".'
+            err += ' Use a Linebreak instead.'
+            raise GrammarConstructionError(err)
+
+        self._chars = chars
+
+    def __repr__(self):
+        return '<{}{} {}>'.format(
+            self.__class__.__name__,
+            '[{}]'.format(self.item_name) if self.item_name else '',
+            repr(self._chars))
 
 
 class Regex(Item):
