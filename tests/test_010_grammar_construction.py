@@ -158,7 +158,18 @@ def test_construct_linebreak():
 
 
 def test_construct_choice():
-    assert False, 'Test is unfinished'
+    from predator.grammar import Choice, Word
+
+    # you may give your Choice a name
+    c1 = Choice('person_names')
+    c1.addchoice(Word('fred'))
+    c1.addchoice(Word('john'))
+    c1.addchoice(Word('bill'))
+
+    # you can also have a Choice without a name
+    c2 = Choice(None)
+    c2.addchoice(Word('aaa'))
+    c2.addchoice(Word('bbb'))
 
 
 def test_construct_sequence():
