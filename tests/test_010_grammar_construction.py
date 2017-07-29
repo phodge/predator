@@ -77,7 +77,43 @@ def test_construct_word():
 
 
 def test_construct_literal():
-    assert False, 'Test is unfinished'
+    from predator.common import GrammarConstructionError
+    from predator.grammar import Literal
+
+    # things that do work
+    Literal(' ')
+    Literal('!')
+    Literal('@#')
+    Literal('!@#$%^&*()_+')
+
+    # they should accept names as well
+    l = Literal('@', name='at_symbol')
+    assert l.item_name == 'at_symbol'
+
+    #FIXME: work out whether we should (or can) support NULs in our strings
+
+    # things that won't work
+    things_that_fail = (
+        '\n',
+        '!\n!',
+        '\r',
+        '!\r!',
+        '',
+    )
+
+    for badinput in things_that_fail:
+        try:
+            # symbols don't work
+            Literal(badinput)
+        except GrammarConstructionError:
+            pass
+        else:
+            err = 'Literal({!r}) should have failed'.format(badinput)
+            raise Exception(err)
+
+    # make sure Literal has a nice repr
+    _checkrepr(Literal('%'), ['%'])
+    _checkrepr(Literal('%', name='percent_sign'), ['%', 'percent_sign'])
 
 
 def test_construct_regex():
