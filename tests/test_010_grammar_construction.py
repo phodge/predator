@@ -198,7 +198,15 @@ def test_construct_sequence():
 
 
 def test_construct_whitespace():
-    assert False, 'Test is unfinished'
+    from predator.grammar import Literal, Whitespace, Word
+
+    # you can construct a whitespace sequence manually
+    w = Whitespace()
+
+    # and then you can add normal items to it
+    w.addwhitespaceitem(Literal('.'))
+    w.addwhitespaceitem(Literal('"'))
+    w.addwhitespaceitem(Word('rem'))
 
 
 def test_construct_everything():
