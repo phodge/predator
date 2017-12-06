@@ -173,7 +173,28 @@ def test_construct_choice():
 
 
 def test_construct_sequence():
-    assert False, 'Test is unfinished'
+    from predator.grammar import Literal, Sequence, Word
+
+    # you can construct a sequence and tell it to match things in sequence
+    s = Sequence(None)
+    s.additem(Word('a'))
+    s.additem(Word('b'))
+    s.additem(Word('c'))
+
+    # you can give it a name and tell it to ignore spaces
+    s = Sequence('hashbang', spaces=False)
+    s.additem(Literal('#'))
+    s.additem(Literal('!'))
+
+    # you can give the children names
+    s = Sequence(None)
+    s.additem(Literal('#'), 'hash')
+    s.additem(Literal('!'), 'bang')
+
+    # you can make the children repeat or be optional
+    s = Sequence(None, spaces=False)
+    s.additem(Literal('#'), many=True)
+    s.additem(Literal('!'), optional=True)
 
 
 def test_construct_whitespace():
