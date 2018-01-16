@@ -1,4 +1,5 @@
 import pytest  # noqa
+from pytest import raises
 
 
 def _get_grammar():
@@ -9,6 +10,7 @@ def _get_grammar():
     message.additem(Word("reee"), "the_reee")
     message.additem(Word("goodbye"), "the_goodbye")
     message.initleader(Whitespace())
+    return message
 
 
 def asserttip(node_, txt, *, name=None, where):
@@ -43,6 +45,31 @@ def parsenow(item, data):
         import pprint
         print('f = ' + pprint.pformat(f))  # noqa TODO
     raise Exception("parsenow() returned a faulty node")
+
+
+def test_no_whitespace():
+    """
+    Test that a Sequence can become the leader without an Whitespace item.
+    """
+    from predator.grammar import Sequence, Word
+
+    body = Sequence('cool_body')
+    body.additem(Word('hello'))
+    body.additem(Word('goodbye'))
+    body.initleader(None)
+
+
+def test_whitespace_never_the_leader():
+    """
+    Test that a whitespace item can't be used as the leader.
+    """
+    from predator.grammar import Whitespace
+    from predator.common import GrammarConstructionError
+
+    # try turning a Whitespace() instance into the leader
+    z = Whitespace()
+    with raises(GrammarConstructionError):
+        z.initleader(None)
 
 
 def test_linebreaks():
