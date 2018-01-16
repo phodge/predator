@@ -244,10 +244,6 @@ def test_construct_whitespace():
     assert w1.is_white and w2.is_white
 
 
-def test_construct_everything():
-    assert False, 'Test is unfinished'
-
-
 def _checkrepr(item, lookfor):
     """
     Checks that a grammar item's repr() is sane.
