@@ -198,15 +198,50 @@ def test_construct_sequence():
 
 
 def test_construct_whitespace():
-    from predator.grammar import Literal, Whitespace, Word
+    from predator.grammar import (Literal, Linebreak, Regex, Sequence,
+                                  Whitespace, Word, Choice)
 
     # you can construct a whitespace sequence manually
     w = Whitespace()
+    assert w.is_white
 
     # and then you can add normal items to it
     w.addwhitespaceitem(Literal('.'))
     w.addwhitespaceitem(Literal('"'))
+    w.addwhitespaceitem(Linebreak())
     w.addwhitespaceitem(Word('rem'))
+    # NOTE: this is a poor Regex example because it can't cross linebreaks
+    w.addwhitespaceitem(Regex('c_style_comment', r'/\*.*\*/'))
+
+    # you can even add complex sequences as children
+    s = Sequence('c_style_comment_2')
+    s.additem(Literal('/*'))
+    s.additem(Regex('c_style_comment_inside', r'(\*[^/]|[^*])*'))
+    s.additem(Literal('*/'))
+    assert not hasattr(s, 'is_white')
+    w.addwhitespaceitem(s)
+    assert s.is_white is True
+
+    # you can add your whitespace item to another whitespace item
+    w2 = Whitespace()
+    w2.addwhitespaceitem(w)
+    del w, s, w2
+
+    # recursive patterns are allowed
+    w1 = Sequence('white_one')
+    w2 = Choice('white_two')
+    w1.additem(Word('one'))
+    w1.additem(w2)
+    w2.addchoice(w1)
+    w2.addchoice(Word('two'))
+
+    # adding the items to the Whitespace() item turns them into whitespace also
+    assert not hasattr(w1, 'is_white')
+    assert not hasattr(w2, 'is_white')
+    w3 = Whitespace()
+    w3.addwhitespaceitem(w1)
+    w3.addwhitespaceitem(w2)
+    assert w1.is_white and w2.is_white
 
 
 def test_construct_everything():
