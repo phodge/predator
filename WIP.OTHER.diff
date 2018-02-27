@@ -1,0 +1,2723 @@
+diff --git a/AMBIGUOUS_GRAMMARS.txt b/AMBIGUOUS_GRAMMARS.txt
+new file mode 100644
+index 0000000..1895d4a
+--- /dev/null
++++ b/AMBIGUOUS_GRAMMARS.txt
+@@ -0,0 +1,86 @@
++NOTE ON PRECEDENCE:
++Precedence conflicts are only possible via recursion. Consider these grammar
++rules:
++
++    add: expr '+' expr;
++    mult: expr '*' expr;
++    expr: $INT or add or mult;
++
++Because `add` can start with `mult`, and `mult` can end with `add`, there are
++multiple ways to parse "1 + 2 * 3".
++
++Consider the input '-a == b' when parsed with these rules:
++
++    neg: '-' expr;
++    cmp: expr '==' expr;
++    expr: $NAME or cmp or neg;
++
++Again, the precedence conflict is caused by the fact that `neg` can end with
++`cmp`, and `cmp` can start with `neg`.
++
++
++UNARY PRECEDENCE CONFLICTS
++
++Even unary operators can have precedence conflicts. Consider the input "--x"
++and the following grammar:
++
++    neg: '-' expr;
++    decrement: '--' $NAME;
++    expr: $NAME or neg or decrement;
++
++The input could be two negations or a single decrement of `x`. This time the
++precedence conflict is not because `neg` can contain `decrement`, but because
++the starting literals of `neg` have the potential to both match some inputs.
++
++I'm calling it - it's too hard to detect every possible conflict between
++grammar items at grammar compilation time (especially regex items); therefore
++precedence conflicts will need to be detected during parsing.
++
++
++RESOLVING PRECEDENCE CONFLICTS
++
++If grammar authors were to annotate precedence rules like this:
++
++    PRECEDENCE: neg, cmp;
++
++Then we can choose between the two valid nodes for '-a == b' by selecting the
++one that starts with the lowest-precedence item (`cmp`) instead of the one that
++starts with `neg`.
++
++We can do the same for our second example - when the precedence order is
++declared as 'PRECEDENCE: decrement, neg;', we know that the node with `neg` is
++the one to pick. Actually that's not true at all. FAIL.
++
++
++
++OLD STUFF
++
++Consider this simple grammar for handling optionally-grouped addition/subtraction:
++
++    multiply: expr '*' expr;
++    add: expr '+' expr;
++    expr:
++        is_leader
++        ( '(' expr ')' )
++        or __INT__
++        or multiply
++        or add
++        ;
++
++What happens when we parse the input text "1 + 2 * 3"?
++
++    1. The `expr` leader (which has been turned into a Choice) will create
++       candidates for each of its variants.
++    2. The first candidate will attempt to look for a '(' literal, will not
++       find it, and will increase its error count.
++    3. The second candidate is an __INT__ Item and which will match at this
++       location.
++    4. The parseall() function will notice that the returned node doesn't match
++       all characters, so will increase its error count and then ask for a new
++       node at the same location.
++    5. The `expr` item will try its next candidate - the `multiply` variant.
++       It will ask for a `multiply` item at the start location, which will get
++       an error count, and then it will ask for an `add` variant, which will
++       yield an `add` node encompassing the "1 + 2" part of the stream.
++    6. Again, parseall() realises there is not enough text, so it adds an error
++       to the `add` node
+diff --git a/PRECEDENCE_TAKE_2.txt b/PRECEDENCE_TAKE_2.txt
+new file mode 100644
+index 0000000..410f654
+--- /dev/null
++++ b/PRECEDENCE_TAKE_2.txt
+@@ -0,0 +1,126 @@
++EXAMPLES
++
++Consider these grammar items:
++
++    neg: '-' expr;
++    decrement: '--' expr;
++    expr (leader): $NAME or decrement or neg;
++
++Note that this grammar is indirectly recursive - that is, the `expr` rule can
++recurse into itself, but you won't find this out unless you inspect the
++`decrement` and/or `neg` rules also.
++
++Then consider the input "---foo".
++
++There are three ways to match this thing:
++
++    A:
++    neg[
++        $LITERAL['-'],
++        neg[
++            '-',
++            neg[
++                '-',
++                $NAME["foo"]
++            ]
++        ]
++    ]
++
++    B:
++    decrement[
++        $LITERAL['--'],
++        neg[
++            '-',
++            $NAME["foo"]
++        ]
++    ]
++
++    C:
++    neg[
++        '-',
++        decrement[
++            $LITERAL['--'],
++            $NAME["foo"]
++        ]
++    ]
++
++What's missing in the grammar is that the `decrement` operator should have the
++highest precedence. Therefore tree (C) is the correct interpretation. But how
++do we design a system that always chooses the correct parse tree?
++
++When `expr` generates candidates for `$NAME`, `decrement`, `neg` etc to consume
++the input and there are multiple valid matches, it gives first preference to
++the candidate for the item which is listed first.
++
++
++TODO: consider left-assoc vs right-assoc rules. E.g.
++
++E.g. in PHP, '-' is left-associative, so:
++
++  1 - 2 - 3  =>  (1 - 2) - 3
++
++But '+=' is right-associative, so:
++
++  $a += $b += 3  =>  $a += ($b += 3)
++
++Also '==' is non-associative so it is a syntax error to use:
++
++  $a == $b == $c
++
++But sometimes it's OK to have a non-associative operator in a precedence showdown, e.g.:
++
++  $a instanceof $b instanceof $c
++
++
++
++SIMPLE LEFT-ASSOCIATIVITY
++
++Consider:
++
++    mul: expr '*' expr;
++    div: expr '/' expr;
++    sum: expr '+' expr;
++    sub: expr '-' expr;
++    expr (leader): mul | div | sum | sub | INTEGER;
++
++We can statically prove that `expr` is left-recursive because recursively
++analysing all possible first-token matches leads us through `mul` and back to
++`expr`. (In fact, every single one of our items is recursive.)
++
++We can also statically prove that `expr` is right-recursive because recursively
++analysing all possible last-token matches leads us through `mul` and back to
++`expr`. (And yes, again, every single one of our items is right-recursive).
++
++When we parse '1 * 2 + 3', the `expr` choice item creates a candidate for each
++of the 4 possible sequence items (mul, div, sum, sub), and a 5th candidate for
++plain $INTEGER. Each of the sequence candidates is also going to create its own
++set of candidates, which will immediately want another `expr`. If we take note
++of the fact that we are trying to create a `mul` from within an `expr`, we
++could simply not allow trying to attempt another `expr` at this location in the
++stream. While this is a simple way to prevent infinite recursion (and is also
++the first thing I tried), it does prevent us from reaching the correct parsing
++result: 'sum[mul[1 * 2] + 3]'.
++
++I think handling of the recursion issue is best handled by the sequence items,
++not the `expr`. For example, if we stipulate that the order of declarations
++implies precedence order, and enhance the declarations of the sequences
++with details on whether each sequence is left-associative or right-associative
++(or non-associative), we come up with the following:
++
++    mul (right-assoc): expr '*' expr;
++    div (right-assoc): expr '/' expr;
++    sum (left-assoc): expr '+' expr;
++    sub (left-assoc): expr '-' expr;
++    expr (leader): mul | div | sum | sub | INTEGER;
++
++The `expr` choice item should assume that there might be multiple matches at a
++particular location, and unless otherwise stipulated, the correct one to yield
++is the one that consumes the largest number of characters from the input
++stream. Note that when it does yield, it will yield a Sequence.
++
++So what about our input '1 * 2 + 3'? The `expr` item will yield 2 of the same
++length - one being a `mul` containing a `sum`, and the other being a `sum`
++containing a `mul`. Not quite, the `sum` containing a `mul` will never happen
++because a `mul` ending at "2" will never be yielded in favour of a `mul` ending
++at "3".
++
+diff --git a/TODO.txt b/TODO.txt
+new file mode 100644
+index 0000000..b155c54
+--- /dev/null
++++ b/TODO.txt
+@@ -0,0 +1,130 @@
++NEW GRAMMAR PARSING TECHNIQUE
++=============================
++
++
++Goal
++----
++
++To have a top-level grammar item that yields different types of matches in
++decreasing levels of quality. In essence, "This Item matches this part of the
++input stream perfectly, but if we fudge this part a little, we can get a much
++longer match.
++
++So clearly when we are asking the Grammar Item for matches, there's a few
++things we care about:
++- we want the node structure
++- we want to know much of the input stream was matched
++- we want to know what problems were encountered along the way
++
++
++Implementation
++--------------
++
++Grammar Items need a `yieldnode()` method which is a generator that yields
++matching nodes in decreasing order of quality. This means `yieldnode()` needs
++to work something like this:
++
++1. Determine up-front a fixed list of sub-items that need to match in order to
++   have a correct match.
++2. Create a list of "WIP" node candidates.
++3. Create a candidate that is pointing at sub-item 0 (call this S) and has 0 errors
++   and put it in the list.
++4. Find the candidate with lowest number of errors and the greatest match
++   length, call it N
++5. Look at sub-item S that canidate N is currently pointing at:
++6. Clone candidate N and call it C
++7. Ask the stream for the first match (M) of S at this position.
++8. Put the match M into candidate N at this position and advance its pointer S.
++   Add the error counts from M to N's dictn.
++9. Tell the clone C that it is not to accept a match of S at this position
++   unless it is >M in the stream's index of matches of S at this position.
++10. Repeat 4. until item you have a node whose sub-item pointer S is past the
++  end of the list of sub-items
++
++Now for some extra complexities that we will also need:
++
++- In 8, if there is no match then we don't create a clone, remove N from the
++  WIP list, destroy N, and go back to 4.
++
++- In 9, we also need to create a clone C2 where we instead of looking at the
++  next match >M, we just skip it altogether. This clone gets an error added to
++  it: `Error(type=skip, what=<the-sub-item>)`
++- In 9, we also need to create a clone C3 which is configured to try and match
++  a completely different Item (Q) from the list of items-by-complexity. It gets
++  its match_something_else_by_complexity set to `0`
++- In 9, if we are looking at a Q match instead, we have to add an error to the node N:
++  `Error(type=replace, what=<sub-item> substitute=<whatever we matched instead>)`
++  We also need to create a clone C4 for with .match_something_else_by_complexity += 1.
++
++- In 5, we also need a distinct sub-item for when the following sub-item is
++  optional. In this case, we advance node N's S pointer by 1, and create a C2
++  with its pointer advanced by 2.
++
++- In 5, we also need a distinct sub-item for when the next sub-item should
++  be repeated. In this case, we look at S+1 and put it into N, and create clone
++  C with S+2 and sub-item added.
++
++If the grammar item is a Choice item, then we vary a couple of things:
++
++- At 1. our list of sub-items will only have a single entry
++- At 2. we create a WIP candidate for each possible sub-item and set their M=-1
++
++How to determine the next candidate to examine?
++
++1. order candidates by Error score, which is:
++  `sum([min([2 * count, 3]) for count in .errors.values())`
++2. order candidates by .match_length, longest first.
++
++
++Now, having said all that, I'm still extremely concerned about the exponential
++growth of C clones ... somewhere between 1 and 3 new clones will be created for
++every sub-item S (multiply that number by infinity if there is a repeat in
++there). Eating up RAM like this is probably completely unacceptable. But first,
++lets take a look at what's included in a clone C:
++
++NodeCandidate:
++  int next_step = 0
++  int match_length = 0
++  errors = {<Error>: <count>}
++  # NOTE: you might think "maybe we can just store the match pos idx of the
++  # sub-items to save memory" or "maybe we can just store the decision we made
++  # at each step to save memory" but you'd be wrong! Storing pointers to the
++  # individual Nodes is literally the most compact thing we can do here. 
++  items = [<list of Nodes>]
++  items_preserve = 0
++  match_something_else_by_complexity = None/<int Q>
++
++So, some optimizations we can make instantly are:
++
++- Use copy-on-write for candidate's .errors and .items properties. This means that:
++  - every time a C clone is created at 6, the errors dict and items list are
++  just copying pointers.
++  - every time a C2 or C3 is created, a new .errors dict will be created, but the
++  .items list is just a pointer copy.
++- more than just copy-on-write for .items, we can use the original candidate's
++  .items list and have a separate .items_preserve that tells us how much of the
++  item's dict should be included in our candidate. Since the .items lists are
++  guaranteed to be append-only, we just have to remember to make a copy before
++  we append to our candidate.
++
++After further consideration, and if the optimizations above are made, I think
++memory usage is a non-issue. Even though we make a C, C2, C3 and C4 candidate
++at every decision point, the decision points are really only at the start of
++new lines, sequences of whitespace, or simple items such as words. So for every
++syntax "token", we'll have a real Node, and probably 4 candidates. BUT each
++candidate is only a 4 integers, a pointer to a list, and probably a .errors
++dict with a single item. Now the C-C4 candidates will also be created for each
++parent Sequence that's being examined, which means even more candidates for
++some "tokens", but these candidates only exist at the much more sparse
++boundaries of the bigger sequences, and the boundaries grow further apart as
++you look at higher-level sequences. I think this implementation will work well.
++
++
++TODO:
++- we probably want to weight errors ... e.g., a type="skip" or "replace" should
++  be weighted according to the complexity of the item that was skipped,
++  replaced, or substituted. We could also apply weighting according 
++
++- maybe think about how we would come up with a Candidate and Error to
++  represent the scenario where a match can be fixed by re-ordering two items
++  that appear to have been added in the wrong order. E.g. `def foo(**kwargs, x=1): pass`
+diff --git a/bin/pred2vim.py b/bin/pred2vim.py
+new file mode 100644
+index 0000000..80ac986
+--- /dev/null
++++ b/bin/pred2vim.py
+@@ -0,0 +1,77 @@
++#!/usr/bin/env python3
++import argparse
++import sys
++
++from lrparsing import (Grammar, Keyword, List, Opt, Ref, Repeat, Token,
++                       TokenRegistry)
++
++
++#class Predator1Grammar(Grammar):
++    #class T(TokenRegistry):
++        #name = Token(re='[A-Za-z_][A-Za-z_0-9]*')
++        #nl = Token(re="[\r\n]")
++        #eol = Repeat(' ') + comment
++        #comment = Token(re="#[^\r\n]*")
++        #quantifier = Token('*')
++        #dot = Token('.')
++        #literal = Token(re="'[^']*'")
++
++    #decl_keywords = Repeat(Keyword('export'))
++    #maybe_comments = Repeat(T.comment)
++
++    #item_group = Ref('item_group')
++    #match_token = (T.literal | T.dot | T.name | item_group) + Opt(T.quantifier)
++
++    #item_group = ('('
++                  #+ List(
++                      #Repeat(maybe_comments + match_token, min=1),
++                      #',',
++                      #min=1,
++                      #opt=True)
++                  #+ ')')
++
++    #doctype = Keyword("predator") + '/1.0'
++    #import_ = (Keyword('from') + T.name + Keyword('import') + T.name
++               #+ Opt(Keyword('as') + T.name))
++    #decl_body = ('{'
++                 #+ decl_keywords
++                 #+ item_group + Opt(T.quantifier) + '}')
++    #declaration = T.name + (decl_body | item_group + Opt(T.quantifier))
++    #statement = (T.comment
++                 #| declaration
++                 #| import_)
++    #document = (doctype + Repeat(statement))
++    #START = document
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument('--synprefix')
++    p.add_argument('--outfile')
++    args = p.parse_args()
++
++    # construct tree of parser items
++
++    # parse the input stream
++    from predator.predator1grammar import leader
++    tree = leader.consume(InputStream(sys.stdin.read()))
++    import pprint
++    import pprint
++    for rule in parse_tree:
++        import pprint
++        print('type(rule) = ' + pprint.pformat(type(rule)))  # noqa TODO
++        print('rule = ' + pprint.pformat(rule))  # noqa TODO
++        import pprint
++        print('rule.first_set = ' + pprint.pformat(rule.first_set))  # noqa TODO
++        import pprint
++        print('rule.nested = ' + pprint.pformat(rule.nested))  # noqa TODO
++        for egg in rule.nested:
++            import pprint
++            print('egg = ' + pprint.pformat(egg))  # noqa TODO
++            import pprint
++            print('type(egg) = ' + pprint.pformat(type(egg)))  # noqa TODO
++        break
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/predator-1.0.pred b/predator-1.0.pred
+index 0ad3991..0cbe675 100644
+--- a/predator-1.0.pred
++++ b/predator-1.0.pred
+@@ -1,9 +1,27 @@
+ predator/1.0
+ 
++# WHITESPACE
++# - typical use-cases:
++# - 1) C-style languages where all types of whitespace,newlines,comments can be
++#   used interchangeably and optionally
++# - 2) Python-style languages where newlines have extra meaning but parenthesis
++#   need to be able to automatically connect multiple lines. Also indentation
++#   is significant for this scenario.
++# - 3) Syntax items where everything needs to run together without spaces or
++#   comments (string/float/octal literals)
++#
++# we *could* also let the user specify what whitespace items to expect between
++# things on a per-item basis. This would only be necessasry for items that have
++# multiple things in their pattern
++# 
++# For indentation-based statement wrapping we would need some sort of thing
++# that works out the indentation level of a line compared to a parent ... I
++# think we'll skip this for v1.0
++
+ # comment is a '#' through to the end of the line
+-comment: is_whitespace nospace '#' /.*$/;
++comment: is_whitespace nospace '#' /.*/ __ENDOFLINE__;
+ 
+-doctype: 'predator/1.0\n';
++doctype: nospace 'predator/1.0' __ENDOFLINE__;
+ 
+ name: /\b[A-Za-z_][A-Za-z_0-9]*\b/;
+ 
+@@ -41,8 +59,6 @@ group: maybe (repeat or "nospace") as group_opt '(' choice as group_inner ')';
+ declaration:
+ 	name as decl_name ':'
+ 	# declaration may start with either the is_whitespace or is_leader options
+-	maybe ("is_whitespace" or "is_leader") as decl_option
+-	# you can also use the nospace option here
+ 	maybe "nospace" as decl_nospace
+ 	# the declaration ends with a single choice
+ 	choice as decl_choice
+diff --git a/predator/common.py b/predator/common.py
+index 42b82ea..185edbc 100644
+--- a/predator/common.py
++++ b/predator/common.py
+@@ -12,3 +12,38 @@ class GrammarConstructionError(Exception):
+     Raised when something attempts to create an instance of a
+     predator.grammar.Item subclass using bad arguments.
+     """
++
++
++class CachedProperties:
++    def __getattr__(self, name):
++        # the dict that maps property names to method names is computed by
++        # looking at parent classes as well (each can have its own definition
++        # of _cached_properties). So we recurse through all the parents and put
++        # the merged mapping into self.__class__._cached_properties_computed
++        computed = getattr(self.__class__, '_cached_properties_computed', None)
++        if computed is None:
++            computed = self._compute_cached_properties()
++
++        methodname = computed.get(name)
++        if methodname is None:
++            raise AttributeError(
++                "class '{}' does not have attribute '{}'"
++                .format(self.__class__.__name__, name))
++
++        value = getattr(self, methodname)()
++        setattr(self, name, value)
++        return value
++
++    def _compute_cached_properties(self):
++        computed = {}
++        inspected = set()
++        inspect = [self.__class__]
++        while len(inspect):
++            first = inspect.pop(0)
++            if first in inspected:
++                continue
++            inspected.add(first)
++            inspect.extend(first.__bases__)
++            computed.update(getattr(first, '_cached_properties', {}))
++        self.__class__._cached_properties_computed = computed
++        return computed
+diff --git a/predator/grammar/basic.py b/predator/grammar/basic.py
+index 185da9b..eeb80cb 100644
+--- a/predator/grammar/basic.py
++++ b/predator/grammar/basic.py
+@@ -1,11 +1,28 @@
+ import re
+ 
+-from predator.common import WORD_RE, GrammarConstructionError
++from predator.common import WORD_RE, CachedProperties, GrammarConstructionError
+ from predator.grammar.common import Item
++from predator.nodes import Tip
+ 
+ LINEBREAK_ITEM_NAME = '__LINEBREAK__'
+ 
+ 
++# we assume an exact Word match is a very good indication that an Item is
++# supposed to match around this point in the stream.
++WORD_MATCH_SCORE = 10
++
++
++# single characters are considered "similar" to other single characters when
++# they appear in one of these strings together.
++SIMILAR_CHARACTERS = (
++    "([{",
++    ")]}",
++    ",:;",
++    "\"'`",
++    "/\\",
++)
++
++
+ class Word(Item):
+     """
+     A grammar object that matches a whole word, respecting word boundaries.
+@@ -19,14 +36,58 @@ class Word(Item):
+ 
+         self._word = word
+ 
++        self.unique_identifier = (self.__class__.__name__,
++                                  self.item_name,
++                                  self._word)
++
+     def __repr__(self):
+         return '<{} {}>'.format(self.__class__.__name__, self._word)
+ 
++    def _similarity(self, item):
++        """
++        Return a tuple representing how similar <item> is it <self>.
++        """
++        # TODO: document how similarity checks work for Words
++        same = isinstance(item, self.__class__)
++
++        # TODO: add another level of similarity that indicates that the other
++        # Word is only differs in case-sensitivity
++        substr = False
++        if same:
++            substr = (item._word in self._word) or (self._word in item._word)
++
++        simple = isinstance(item, (Literal, Regex))
++
++        return (
++            0 if same else 1,
++            0 if substr else 1,
++            0 if simple else 1,
++        )
++
++    def _yieldnode(self, stream, where, idx, *, ignore):
++        # FIXME: do we want to have alternatives for Words that try different
++        # variations of the word (try ignoring case, grab a longer word or a
++        # shorter word, etc)
++        if idx == 1:
++            return None
+ 
+-class Literal(Item):
++        assert idx == 0
++        match = stream.seeword(self._word, where)
++        return Tip(self, where=where, text=match) if match else None
++
++
++class Literal(Item, CachedProperties):
+     """
+     A grammar object that matches text equal to an exact string.
+     """
++    _cached_properties = {
++        '_char_family': '_get_char_family',
++    }
++
++    # Literals may be used as Whitespace by adding them to a Whitespace item,
++    # but they cannot "contain" whitespace
++    allow_spaces = False
++
+     def __init__(self, chars, *, name=None):
+         super().__init__(name)
+ 
+@@ -41,12 +102,57 @@ class Literal(Item):
+ 
+         self._chars = chars
+ 
++        self.unique_identifier = (self.__class__.__name__,
++                                  self.item_name,
++                                  self._chars)
++
+     def __repr__(self):
+         return '<{}{} {}>'.format(
+             self.__class__.__name__,
+             '[{}]'.format(self.item_name) if self.item_name else '',
+             repr(self._chars))
+ 
++    def _get_char_family(self):
++        if len(self._chars) == 1:
++            for family in SIMILAR_CHARACTERS:
++                if self._chars in family:
++                    return family
++        return ""
++
++    def _similarity(self, item):
++        """
++        Return a tuple representing how similar <item> is it <self>.
++        """
++        # TODO: document how similarity checks work for Literals
++        same = isinstance(item, self.__class__)
++
++        # if the other literal is the same length:
++        if same and len(item._chars) == 1:
++            same_family = item._chars in self._char_family
++        else:
++            same_family = False
++
++        simple = isinstance(item, (Word, Regex))
++
++        return (
++            0 if same else 1,
++            0 if same_family else 1,
++            0 if simple else 1,
++        )
++
++    def _yieldnode(self, stream, where, idx, *, ignore):
++        # FIXME: do we want to have alternatives for Literals that try
++        # alternative characters that are close to the original but have
++        # errors attached?
++        if idx == 1:
++            return None
++
++        assert idx == 0
++        if stream.peek(where, len(self._chars)) == self._chars:
++            return Tip(self, where=where, text=self._chars)
++
++        return None
++
+ 
+ class Regex(Item):
+     """
+@@ -69,20 +175,69 @@ class Regex(Item):
+             msg = "Regex compilation failed: " + str(err)
+             raise GrammarConstructionError(msg)
+ 
++        self.unique_identifier = (self.__class__.__name__,
++                                  self.item_name,
++                                  self._pattern)
++
++    def _similarity(self, item):
++        """
++        Return a tuple representing how similar <item> is it <self>.
++        """
++        same = isinstance(item, self.__class__)
++        pattern = same and (item._pattern == self._pattern)
++        simple = isinstance(item, (Word, Literal))
++
++        return (
++            0 if same else 1,
++            0 if pattern else 1,
++            0 if simple else 1,
++        )
++
+     def __repr__(self):
+         return '<{}{} /{}/>'.format(
+             self.__class__.__name__,
+             '[{}]'.format(self.item_name) if self.item_name else '',
+             self._regex.pattern)
+ 
++    def _yieldnode(self, stream, where, idx, *, ignore):
++        # there is never a second candidate for a Regex item. It matches, or
++        # it doesn't.
++        if idx == 1:
++            return None
++
++        assert idx == 0
++        match = stream.getregex(self._regex, where)
++        if not match:
++            return None
++
++        return Tip(self, where=where, text=match)
++
+ 
+ class Linebreak(Item):
+     """
+     A grammar object that matches newlines. A special item is needed because
+     the input stream doesn't store newline characters.
+     """
++    # there are no meaningful alternatives for a linebreak
++    alternatives = []
++    is_white = True
++
+     def __init__(self):
+         super().__init__(LINEBREAK_ITEM_NAME)
+ 
++        self.unique_identifier = (self.__class__.__name__, )
++
+     def __repr__(self):
+         return '<{}>'.format(self.__class__.__name__)
++
++    def _yieldnode(self, stream, where, idx, *, ignore):
++        # There is never a second candidate for a Linebreak item. It matches
++        # or it doesn't.
++        if idx == 1:
++            return None
++
++        assert idx == 0
++        if stream.iseol(where):
++            return Tip(self, where=where, text="\n")
++
++        return None
+diff --git a/predator/grammar/choices.py b/predator/grammar/choices.py
+index 81d29ea..ec4350d 100644
+--- a/predator/grammar/choices.py
++++ b/predator/grammar/choices.py
+@@ -1,4 +1,8 @@
+-from predator.grammar.common import Item
++from predator.common import CachedProperties
++from predator.grammar.basic import Item
++from predator.grammar.common import _log
++from predator.grammar.common import Candidate
++from predator.nodes import Node
+ 
+ 
+ class Choice(Item):
+@@ -11,6 +15,192 @@ class Choice(Item):
+ 
+         self._choices = []
+ 
++        # Choice items don't provide alternatives for when they can't be
++        # matched as part of a sequence. This is because it's subitems will
++        # *already* attempt the only meaningful alternatives
++        self.alternatives = []
++
++    def __repr__(self):
++        return '<Choice[{}] ({})>'.format(
++            self.item_name, "|".join(map(repr, self._choices)))
++
+     def addchoice(self, item):
+         assert isinstance(item, Item)
++        assert not hasattr(self, '_leader')
++
+         self._choices.append(item)
++
++        if getattr(self, 'is_white', False):
++            item.becomewhite()
++
++    def becomewhite(self):
++        # prevent infinite recursion if we are our own child
++        if getattr(self, 'is_white', False):
++            return
++
++        super().becomewhite()
++
++        for item in self._choices:
++            item.becomewhite()
++
++    def _grammarinit(self, leader, done, *, is_white=None, parent=None):
++        raise Exception("TODO: phase this out")  # noqa
++        super()._grammarinit(leader, done, is_white=is_white, parent=parent)
++
++        # call _grammarinit on our children
++        for item in self._choices:
++            if item not in done:
++                item._grammarinit(leader, done, parent=self)
++
++    def getchoiceitems(self):
++        return self._choices
++
++    def getstartingcandidates(self, where):
++        # for a Choice, <next_step> indicates which item from self._choices
++        # should be attempted. To start with, we create a single candidates for
++        # every possible choice
++        for choicenr in range(len(self._choices)):
++            yield ChoiceCandidate(choicenr)
++
++    def _yieldnode(self, stream, where, idx, *, ignore):
++        # things are simpler in the land of Choices. We start with exactly one
++        # candidate for each possible item, and we never examine alternatives
++        candidates = stream.getcandidates(self, where)
++
++        # if we're recursing into children (at the current location) make sure
++        # we don't allow them to try and yieldnode() this item as one of their
++        # child items
++        subignore = set(ignore)
++        subignore.add(self)
++
++        _log("Attempting to yield %dth %r at %r", idx, self, where)
++
++        work_done = False
++
++        while len(candidates):
++            candidates.sort(key=lambda c: c.score)
++            best = candidates[0]
++
++            _log('  best = %r', best)  # noqa TODO
++
++            # if this candidate actually has a subnode, then we want to yield
++            # that subnode as the next best match of <self> at this position
++            child = best.getnode()
++            if child is not None:
++                candidates.pop(0)
++                _log("  Yielding a %r", child)
++                return child
++
++            # even if <best> doesn't have its node yet, if we've done some work
++            # and best now has a preview, return that preview
++            if work_done and best.haspreview():
++                return best.get_preview()
++
++            # work out what item we should be looking for
++            subitem = self._choices[best.choicenr]
++
++            _log("  best candidate wants a %r", subitem)
++
++            if subitem in subignore:
++                _log("    This choice has been blacklisted: %r", subitem)
++                # destroy the this candidate - we can't recurse into the same
++                # thing again
++                assert best.nodeidx == 0
++                candidates.pop(0)
++                continue
++
++            _log("  looking for choice subitem %r at %r", subitem, where)
++            _log.INDENT += 1
++            subnode = subitem.yieldnode(stream, where, best.nodeidx,
++                                        quick=True, ignore=subignore)
++            _log.INDENT -= 1
++            work_done = True
++
++            if subnode and not isinstance(subnode, Node):
++                best.set_preview(subnode)
++                continue
++
++            if not subnode:
++                _log("  %r wasn't found :-(", subitem)
++                # if we didn't find a subnode, just drop this candidate
++                candidates.pop(0)
++                continue
++
++            # create a clone that'll match the next idx of this thing
++            _log("  got a %r :-D", subitem)
++            c = best.clone()
++            c.nodeidx += 1
++            candidates.append(c)
++
++            # If we found a subnode then we want to attach it to our
++            # candidate.  The candidate is "ready" to be returned, but we
++            # can only do that after comparing it with the other candidates
++            # so that we're certain we're always returning the best
++            # possible candidate
++            best.setnode(subnode, stream)
++
++        # if we reached this point, it means there is no more candidate that
++        # can fulfill this item at this position for this idx. We need to tell
++        # the stream that there is no match <idx> here
++        return None
++
++
++class ChoiceCandidate(CachedProperties, Candidate):
++    __slots__ = [
++        'choicenr',
++        'nodeidx',
++        'match_length',
++        '_node',
++        '_preview',
++        '_faults',
++        'score',
++    ]
++
++    _cached_properties = {
++        'score': '_get_score',
++    }
++
++    def __init__(self, choicenr, *, nodeidx=0):
++        self.choicenr = choicenr
++        self.nodeidx = nodeidx
++        self.match_length = 0
++        self._node = None
++        self._preview = None
++        self._faults = []
++
++    def __repr__(self):
++        return "<{}[{}]+{} with {} faults>".format(
++            self.__class__.__name__,
++            self.choicenr,
++            self.nodeidx,
++            len(self._faults),
++        )
++
++    def setnode(self, node_, stream):
++        self._preview = None
++        assert isinstance(node_, Node)
++        assert self._node is None
++        assert not self._faults
++        self._node = node_
++
++        self.match_length = node_.node_length
++
++        self._faults = node_.getfaults()[:]
++        if hasattr(self, 'score'):
++            del self.score
++
++    def getnode(self):
++        return self._node
++
++    def clone(self):
++        assert self._node is None
++        new = self.__class__(self.choicenr, nodeidx=self.nodeidx)
++        new._preview = self._preview
++        return new
++
++    def _get_score(self):
++        # NOTE: higher scores make a candidate less desirable
++        match_len = self.match_length
++        if self._preview:
++            match_len += self._preview[1]
++        return (self._total_faults(), 0 - match_len)
+diff --git a/predator/grammar/common.py b/predator/grammar/common.py
+index d354f51..076349e 100644
+--- a/predator/grammar/common.py
++++ b/predator/grammar/common.py
+@@ -1,12 +1,55 @@
+-from predator.common import WORD_RE, GrammarConstructionError
++from enum import Enum
+ 
++from predator.common import WORD_RE, CachedProperties, GrammarConstructionError
++from predator.nodes import Node
+ 
+-class Item:
++# TODO: error_count is currently very simplistic and I think it's incapable of
++# giving users the sort of results they need. I'm going to propose a new system
++# here which works like this:
++# - errors can have a 'severity' which is allows us to rank them how a human
++#   would.
++# - item's alternatives should have a 'distance' factor determined instead of
++#   just sorting them alphabetically. For example, a Word item is 'close to'
++#   another Word item if one word is a substring of the other
++# - severity of errors is in some circumstances determined by the 'distance'
++#   factor.
++#
++# 'distance' levels might look like this:
++# TYPO:  Used for when the difference between two words considered a 'typo' by
++#        the user. Also used for single-character literals when the symbols
++#        appear in the same SIMILAR_CHARACTERS string below.
++# CLOSE: used for words that TODO
++
++# TODO: somehow Sequences need to be able to spot the same item repeated before
++# and after a newline
++
++
++# reset log file
++with open('/tmp/predator.txt', 'w') as f:
++    pass
++
++
++def _log(msg, *args):
++    return
++    with open('/tmp/predator.txt', 'a') as _f:  # TODO
++        if len(args):
++            msg = msg % args
++        _f.write(("    " * _log.INDENT) + msg + "\n")
++
++
++_log.INDENT = 0
++
++
++class Item(CachedProperties):
+     """
+     Base class for grammar objects that matches text.
+     """
+     item_name = None
+ 
++    _cached_properties = {
++        'alternatives': '_get_alternatives',
++    }
++
+     def __init__(self, name):
+         super().__init__()
+ 
+@@ -15,3 +58,264 @@ class Item:
+             raise GrammarConstructionError(err)
+ 
+         self.item_name = name
++
++    def initleader(self, whitespace_item):
++        """
++        Tells the current grammar item that it is a leader, allowing you to
++        use its parseall() method to parse an InputStream.
++
++        initleader() also prepares child items for matching text and ensures
++        you don't have any invalid grammar structures, like the same item being
++        a child of Whitespace and also a child.or a regular grammar item.
++        """
++        if getattr(self, 'is_white', False):
++            # FIXME: add a test for this exception
++            msg = '{!r} cannot be a leader as it is already a whitespace item'
++            raise GrammarConstructionError(msg.format(self))
++
++        self.is_white = False
++
++        if whitespace_item:
++            whitespace_item.becomewhite()
++
++        self.whitespace_item = whitespace_item
++
++        self._all_nonws = set()
++
++        self._iteminit(self)
++
++        if whitespace_item:
++            whitespace_item._iteminit(self)
++
++    def _iteminit(self, leader):
++        # bail out instead of being recursive
++        if hasattr(self, 'leader'):
++            # FIXME: add a test for this exception
++            if self.leader is not leader:
++                msg = '{!r} already has leader {!r}'.format(self, self.leader)
++                raise GrammarConstructionError(msg)
++            return
++
++        self.leader = leader
++        self.is_leader = leader is self
++
++        # put ourselves in the list of non-whitespace items
++        if not self.is_white:
++            leader._all_nonws.add(self)
++
++    def parseall(self, stream):
++        """
++        Returns a tuple of two values:
++
++        The first value is a Node which represents the correct match of grammar
++        item <self> which matches the entirety of <stream>. The first value
++        will be None if there is no correct match.
++
++        The second value is a generator which will yield best-guess matches
++        of grammar item <self>. The nodes with the fewest errors are returned
++        first, although all matches are guaranteed to contain errors.
++
++        All "matches" are returned as an instance of predator.nodes.Node.
++        """
++        # find the best match first
++        best = self.yieldnode(stream, (1, 0), 0, ignore=set(), quick=False)
++
++        # if the best match has faults, we want the generator to yield it
++        # instead of returning it from this function
++        if best is not None and best.getfaults():
++            next = best
++            best = None
++        else:
++            next = None
++
++        def _nodegenerator(next, yielded):
++            if next is not None:
++                yield next
++
++            i = 0
++            while True:
++                i += 1
++                next = self.yieldnode(stream, (1, 0), i,
++                                      ignore=set(), quick=False)
++                if next is None:
++                    break
++                yielded += 1
++                yield next
++
++            if not yielded:
++                # FIXME: a better exception here
++                raise Exception("No matches for %r" % (self, ))
++
++        gen = _nodegenerator(next, 1 if best else 0)
++        return best, gen
++
++    def _get_alternatives(self):
++        if self.is_white:
++            return []
++
++        # use unique_identifier attributes to remove items that are identical
++        identifiable = {}
++        other = []
++        for item in self.leader._all_nonws:
++            if hasattr(item, 'unique_identifier'):
++                identifiable[item.unique_identifier] = item
++            else:
++                other.append(item)
++
++        # TODO: provide a way to stop any Whitespace items appearing in this
++        # list.
++        # We probably need to enforce a rule that Whitespace items don't
++        # attempt to match alternatives. This really needs to be applied to
++        # everything that's a sub-item of Whitespace (including sub-items of
++        # sub-items and so on). I think this means that an item can't be used
++        # as Whitespace AND a regular item. Every item has to be either one or
++        # the other.
++        # CHALLENGES
++        # - if you tell the individual items "Hey you're a child of Whitespace
++        #   so don't attempt alternatives!" then you also need to ensure those
++        #   items aren't included as children of regular items.
++        # - if you just get yieldnode() to pass a flag onto children
++        #   (allowalts=?) than items that appear under Whitespace AND under
++        #   regular items will have a candidate list that randomly does or
++        #   doesn't include alternatives.
++        # - if the predator python grammar exports an "expr" item ... can it be
++        #   modified by other things? If the "expr" was used to match python
++        #   expressions in the context of some other language, would we want to
++        #   try and match alternatives from the container grammar?
++        #   What would the end user expect here? I think they'd expect
++        #   everything to behave according to the context of the Leader.
++        #   Therefore I think we have a very strong case for giving the leader
++        #   an .initleader() method which prepares the main node and all
++        #   sub-nodes. Instead of nodes having a set() containing all other
++        #   grammar items, they can just have a pointer back to the Leader, and
++        #   the leader stores the alternatives which are available per node.
++        #   .initleader() can make sure child items aren't already part of
++        #   another grammar.
++        #raise Exception("TODO: this has become a Real Problem and needs fixing")  # noqa
++
++        if hasattr(self, 'unique_identifier'):
++            identifiable.pop(self.unique_identifier, None)
++
++        other.extend(identifiable.values())
++        return sorted(other, key=self._similarity)
++
++    def yieldnode(self, stream, where, idx, *, ignore, quick):
++        # TODO: this method should be refactored so that instead of only being
++        # able to return a complete Node, it will sometimes:
++        # - return just a tuple of (error_count, match_length) representing the
++        # state of the best candidate so far.
++        node_ = stream.getmatch(self, where, idx)
++        if node_ is not False:
++            return node_
++
++        while True:
++            node_ = self._yieldnode(stream, where, idx, ignore=ignore)
++
++            # no match is possible here - record this fact on the stream object
++            # so we never attempt matching this item at this point again.
++            if node_ is None:
++                stream.setmatch(self, where, idx, None)
++                return None
++
++            if isinstance(node_, Node):
++                stream.setmatch(self, where, idx, node_)
++                return node_
++
++            assert len(node_) == 2
++            if quick:
++                return node_
++
++    def becomewhite(self):
++        if getattr(self, 'is_leader', False):
++            raise GrammarConstructionError(
++                '{!r} is a leader item and cannot be used as whitespace'
++                .format(self))
++
++        if hasattr(self, 'is_white') and not self.is_white:
++            raise GrammarConstructionError(
++                '{!r} cannot be used as whitespace and normal'.format(self))
++
++        self.is_white = True
++        self.is_leader = False
++
++
++class FaultTypes(Enum):
++    skipped = "skipped"
++    replaced = "replaced"
++
++
++class Fault:
++    _argnames = {
++        FaultTypes.skipped: ("skipped", ),
++        FaultTypes.replaced: ("expected", "alternate", ),
++    }
++
++    def __init__(self, type_, where, **kwargs):
++        self._type = type_
++        self._where = where
++        self._kwargs = kwargs
++        args = self._argnames[type_]
++        assert len(kwargs) == len(args)
++        for name in args:
++            assert name in kwargs
++
++    def __repr__(self):
++        if self._type == FaultTypes.skipped:
++            skipped = self._kwargs["skipped"]
++            return '<Fault skipped={}>'.format(
++                skipped.item_name or repr(skipped))
++        if self._type == FaultTypes.replaced:
++            alt = self._kwargs["alternate"]
++            exp = self._kwargs["expected"]
++            return '<Fault found={} expected={}>'.format(
++                alt.item_name or alt.__class__.__name__,
++                exp.item_name or exp.__class__.__name__)
++        raise Exception("__repr__() not implemented for FaultType {}".format(
++            self._type))
++
++    def getkey(self):
++        """
++        Get a key that uniquely identifies the type of error. The key is a
++        tuple of hashable things that can be used as keys.
++
++        Notably, the `where` position in the stream isn't used as part of the
++        key.
++        """
++        things = [self._type, self._where]
++        things.extend([self._kwargs[name]
++                       for name in self._argnames[self._type]])
++        return tuple(things)
++
++
++class Candidate:
++    def _total_faults(self):
++        # make a tally of faults by type. Each fault is 2 points, but when the
++        # same fault is repeated many times it counts for a maximum of 3 points
++        faults = {}
++        examine = self._faults
++        if self._preview is not None:
++            examine = examine + self._preview[0]
++        for fault in examine:
++            key = fault.getkey()
++            faults[key] = 3 if faults.get(key) else 2
++
++        return sum(faults.values())
++
++    def haspreview(self):
++        return self._preview is not None
++
++    def get_preview(self):
++        f = self._faults[:]
++        match_length = self.match_length
++        if self._preview:
++            f.extend(self._preview[0])
++            match_length += self._preview[1]
++        else:
++            assert f or match_length
++        return (f, match_length)
++
++    def set_preview(self, preview):
++        assert len(preview) == 2
++        self._preview = preview
++        if hasattr(self, 'score'):
++            del self.score
+diff --git a/predator/grammar/sequences.py b/predator/grammar/sequences.py
+index dcb1d73..5d7f9f5 100644
+--- a/predator/grammar/sequences.py
++++ b/predator/grammar/sequences.py
+@@ -1,13 +1,500 @@
+-from predator.grammar.common import Item
++from predator.common import CachedProperties
++from predator.grammar.basic import Item, Linebreak, Regex
++from predator.grammar.choices import Choice
++from predator.grammar.common import Candidate, Fault, FaultTypes, _log
++from predator.nodes import Fork, Node
++
++WHITESPACE_ITEM_NAME = '__WHITESPACE__'
+ 
+ 
+ class Sequence(Item):
+     """
+     A grammar object that matches text using a fixed sequence of child Items.
+     """
++    _cached_properties = {
++        'step_info': '_get_step_dict',
++    }
++
++    allow_spaces = None
++
++    def __init__(self, name, *, spaces=True):
++        super().__init__(name)
++        self._items = []
++        self.allow_spaces = spaces
++
++    def __repr__(self):
++        named = [item[0].item_name or item[1] or '?' for item in self._items]
++
++        return '<{}{} {}>'.format(
++            self.__class__.__name__,
++            '[{}]'.format(self.item_name) if self.item_name else '',
++            "({})".format(",".join(named)))
++
++    def becomewhite(self):
++        # prevent infinite recursion if we are our own child
++        if hasattr(self, 'is_white'):
++            return
++
++        super().becomewhite()
++
++        # needs to be recursive
++        for itemset in self._items:
++            itemset[0].becomewhite()
++
++    def _grammarinit(self, leader, done, *, is_white=None, parent=None):
++        raise Exception("TODO: phase this out")  # noqa
++        super()._grammarinit(leader, done, is_white=is_white, parent=parent)
++
++        # call _grammarinit on our children
++        for itemset in self._items:
++            child = itemset[0]
++            if child not in done:
++                child._grammarinit(leader, done, parent=self)
++
++    def _similarity(self, item):
++        # FIXME: work out a better way to decide which other items are similar
++        # to the current sequence
++        return isinstance(item, Sequence)
++
++    def additem(self, item, child_name=None,
++                *, optional=False, many=False, append=False, flatten=False):
++        assert isinstance(item, Item)
++        assert not hasattr(self, 'leader'), 'Item has already been initalised'
++        assert many in (True, False)
++        if append:
++            # the append option makes no sense without a child name to append
++            # to
++            assert child_name is not None
++        elif many:
++            # if you have the many flag but _not_ append, then you can't have a
++            # child name
++            assert not child_name
++        if many and child_name:
++            assert append or flatten
++        if flatten:
++            append = True
++
++        self._items.append((item, child_name, optional, many, append, flatten))
++
++        # if we are whitespace, turn the child into whitespace also
++        if getattr(self, 'is_white', False):
++            item.becomewhite()
++
++    def getstartingcandidates(self, where):
++        # for a Sequence, we just need one candidate that'll match the first
++        # step (subitem)
++        c = SequenceCandidate(0, where=where, can_try_space_idx=None)
++        c.origin.append('starting_candidate')
++        yield c
++
++    def _yieldnode(self, stream, where, idx, *, ignore):
++        assert where is not None
++
++        # The Nth match of this item at this position hasn't been generated
++        # yet. We'll need to do that now. Let's grab all the remaining
++        # candidates we have on file for this item at this position.
++        candidates = stream.getcandidates(self, where)
++
++        # if we're recursing into children (at the current location) make sure
++        # we don't allow them to try and yieldnode() this item as one of their
++        # child items
++        subignore = set(ignore)
++        subignore.add(self)
++
++        _log("Attempting to yield %dth %r at %r", idx, self, where)
++
++        work_done = False
++        while len(candidates):
++            candidates.sort(key=lambda c: c.score)
++            #if True:
++                # FIXME: only do this in debug mode or something
++                #self._check_dupe_candidates(candidates)
++            best = candidates[0]
++            _log('  best of %d at %s with score %r is %r of %s', len(candidates), id(candidates), best.score, best, ">".join(best.origin))  # noqa TODO
++            for other in candidates[1:]:
++                _log('  beat: %r with score %r of %s', other, other.score, ">".join(other.origin))  # noqa TODO
++
++            if best.next_step >= len(self._items):
++                assert best.next_step > 0
++                # This means we have found the best candidate for position
++                # [idx]. Make sure we don't examine this candidate again
++                candidates.pop(0)
++
++                if not best.hasnodes():
++                    _log("  discarding empty candidate")
++                    # the candidate needs to have matched at least one thing
++                    return None
++
++                n = best.createnode(self)
++                _log("  yielding %r", n)
++                return n
++
++            if work_done and (best.hasfaults() or
++                              best.match_length or
++                              best.haspreview()):
++                return best.get_preview()
++
++            thing = self._items[best.next_step]
++            item, child_name, optional, many, append, flatten = thing
++
++            # --- attempt to find a node for the current candidate ---
++
++            subitem = item
++            if best.tryalternate is not None:
++                # instead of item, pick another item to match on instead
++                if best.tryalternate >= len(item.alternatives):
++                    # this alternative doesn't exist - discard this candidate
++                    _log("  no more alternatives - discarding this candidate")
++                    candidates.pop(0)
++
++                    # TODO: this is where we'd add some candidates that look at
++                    # special generic items such as:
++                    # WeirdSymbolWeDidntExpect(length=1)
++                    # WeirdSymbolWeDidntExpect(length=2)
++                    # UnexpectedWord()
++                    continue
++
++                subitem = item.alternatives[best.tryalternate]
++                _log("  trying an alternative: %r", subitem)
++
++            if best.can_try_space_idx is not None and best.where is not None:
++                # TODO: even if we're not allowed spaces, we need a way to
++                # force-try spaces in order to make the sequence match
++
++                # if we're allowed to try a whitespace item here, then attempt
++                # it and make a clone if it matches at this position
++                spaceitem = self.leader.whitespace_item
++                _log("  checking for whitespace ...")
++                _log.INDENT += 1
++
++                oldlen = len(candidates)
++                spacenode = spaceitem.yieldnode(stream,
++                                                best.where,
++                                                best.can_try_space_idx,
++                                                quick=False,
++                                                ignore=set())
++                assert len(candidates) == oldlen
++
++                if spacenode:
++                    # create a clone that has this whitespace item and won't
++                    # attempt another whitespace item
++                    c1 = best.clone()
++                    c1.addwhite(spacenode, stream)
++                    c1.origin.append("with_white_%s" % best.can_try_space_idx)
++                    candidates.append(c1)
++
++                    # create another clone that will match the next-best
++                    # whitespace item at this location
++                    c2 = best.clone()
++                    c2.can_try_space_idx += 1
++                    c2.origin.append("want_white_%s" % c2.can_try_space_idx)
++                    candidates.append(c2)
++
++                _log.INDENT -= 1
++
++                # since we now have a clone that contains this whitespace item,
++                # we need to modify `best` so that it won't attempt matching
++                # whitespace here
++                best.can_try_space_idx = None
++
++                work_done = True
++                continue
++
++            if best.where is None:
++                _log("  can't match subitem %r - reached end of stream", subitem)  # noqa
++                subnode = None
++            elif best.where == where and subitem in subignore:
++                # if we're looking for a sub-node at the starting position of
++                # the parent node, then we need to make sure we don't recurse
++                # and try to yield the same item as a grandchild (this will
++                # happen pretty quickly when alternatives are used)
++                subnode = None
++                _log("  subignore() says you can't look for a %r at %r", subitem, best.where)  # noqa
++            else:
++                _log("  look for a subitem %r[%d] at %r", subitem, best.nodeidx, best.where)  # noqa
++                if _log.INDENT >= 50:
++                    raise Exception("TODO: too deep!")  # noqa
++                _log.INDENT += 1
++                oldlen = len(candidates)
++                subnode = subitem.yieldnode(stream, best.where, best.nodeidx,
++                                            quick=True,
++                                            ignore=(subignore
++                                                    if best.where == where
++                                                    else set()))
++                assert len(candidates) == oldlen
++                _log.INDENT -= 1
++                if isinstance(subnode, Node):
++                    _log("  (Found it!)")
++
++                # just the fact that we looked for a sub-node means we've done
++                # some useful work
++                work_done = True
++
++            if subnode and not isinstance(subnode, Node):
++                # if we just got a preview of what the subnode is going to look
++                # like, update the candidate with the preview info
++                best.set_preview(subnode)
++                continue
++
++            # --- create other candidates ---
++
++            # make a clone of best that'll match the next highest idx of
++            # this thing
++            if subnode:
++                c1 = best.clone()
++                c1.nodeidx += 1
++                c1.origin.append("try_%s_%s" % (c1.next_step, c1.nodeidx))
++                candidates.append(c1)
++
++            # make a clone that will try an alternative at this location (only
++            # do this on the very first attempt of a candidate, so we don't
++            # spawn the same alternatives each time nodeidx increments)
++            # If this candidate is already looking at an alternative, we spawn
++            # another candidate to look at the next alternative
++            if best.nodeidx == 0 and best.where is not None:
++                alt = (0 if best.tryalternate is None
++                       else (best.tryalternate + 1))
++                c = best.clone(tryalternate=alt)
++                c.origin.append('try_alt_%s' % alt)
++                candidates.append(c)
++
++            # create another candidate that'll match the same step again if it
++            # repeats
++            if subnode:
++                # if we were matching an alternative item instead of the real
++                # thing, we need to add a fault to our candidate when we add
++                # the subnode
++                if best.tryalternate is not None:
++                    fault = Fault(FaultTypes.replaced,
++                                  best.where,
++                                  expected=item,
++                                  alternate=subitem)
++                    best.addfaults([fault])
++
++                # add the item to <best>, which will advance its step pointer
++                # so it is ready to match the next thing
++                if flatten:
++                    raise Exception("TODO: if the 'flatten' option is given, we need to merge the nodes by putting every child of subnode onto our candidate directly")  # noqa
++                best.addchild(subnode, stream,
++                              name=child_name, append=append,
++                              allowspace=self.allow_spaces)
++                _log("  Candidate's new score is {}".format(best.score))
++
++                # TODO: I think this is creating infinite bad nodes
++                if many and best.where is not None:
++                    repeat = best.clone(tryalternate=False)
++                    repeat.next_step -= 1
++                    repeat.nodeidx = 0
++                    repeat.origin.append("repeat_%s" % repeat.next_step)
++                    candidates.append(repeat)
++            elif best.tryalternate is None and best.nodeidx == 0:
++                # if this is the first time we've looked at the *actual*
++                # correct item but didn't match, we can just tell this
++                # candidate to skip this item and go to the next one
++                best.next_step += 1
++
++                if not optional:
++                    # but if it wasn't optional, then that becomes a Fault on
++                    # the candidate
++                    fault = Fault(FaultTypes.skipped, best.where, skipped=item)
++                    best.addfaults([fault])
++            else:
++                # remove <best> from the candidate list as it won't match here
++                _log("  candidate didn't find its subitem - discarding it")
++                candidates.pop(0)
++
++        # if we reached this point, it means there is no candidate that can
++        # fulfill this item at this position for this idx. We need to tell the
++        # stream that there is no match <idx> here
++        return None
++
++    def _check_dupe_candidates(self, candidates):
++        raise Exception("TODO: what was this?")  # noqa
++        prevscore = None
++        for c in candidates:
++            if c.score == prevscore:
++                raise Exception("TODO: blow up")  # noqa
++            prevscore = c.score
+ 
+ 
+ class Whitespace(Sequence):
+     """
+     A grammar object that matches whitespace.
+     """
++    is_white = True
++
++    # the Whitespace item never offers alternatives
++    alternatives = []
++
++    def __init__(self):
++        super().__init__(WHITESPACE_ITEM_NAME)
++
++        opts = Choice()
++        opts.addchoice(Linebreak())
++        opts.addchoice(Regex('spaces', r' +'))
++        opts.addchoice(Regex('tabs', r'\t+'))
++
++        self._choice = opts
++        super().additem(opts, 'whitespace_items', many=True, append=True)
++
++    def additem(self, *args, **kwargs):
++        raise Exception("Use Whitespace.addwhitespaceitem() instead")
++
++    def addwhitespaceitem(self, item):
++        self._choice.addchoice(item)
++
++        # tell the child that it is being used as whitespace
++        item.becomewhite()
++
++
++class SequenceCandidate(CachedProperties, Candidate):
++    __slots__ = [
++        'next_step',
++        'nodeidx',
++        'can_try_space_idx',
++        'where',
++        'where_start',
++        'where_end',
++        'match_length',
++        '_nodes',
++        '_nodes_keep',
++        'tryalternate',
++        '_faults',
++        '_preview',
++        'score',
++        # TODO: remove this debug thing
++        'origin',
++    ]
++
++    _cached_properties = {
++        'score': '_get_score',
++    }
++
++    def __init__(self, next_step, *, where, nodeidx=0, can_try_space_idx):
++        assert where is not None
++        self.next_step = next_step
++        self.nodeidx = nodeidx
++        self.can_try_space_idx = can_try_space_idx
++        self.where = where
++        self.where_start = where
++        self.where_end = None
++        self.match_length = 0
++        self._nodes = []
++        self._nodes_keep = 0
++        self.tryalternate = None
++        self._faults = []
++        self._preview = None
++        self.origin = []
++
++    def __repr__(self):
++        return "<{}[{}+{}] with {} nodes and {} faults>".format(
++            self.__class__.__name__,
++            self.next_step,
++            self.nodeidx,
++            len(self._nodes),
++            len(self._faults),
++        )
++
++    def hasnodes(self):
++        return bool(self._nodes)
++
++    def addwhite(self, node_, stream):
++        self._addnode(node_, stream, None, False)
++        self.can_try_space_idx = None
++
++    def addchild(self, node_, stream, *, name, append, allowspace):
++        self._addnode(node_, stream, name, append)
++
++        # advance to the next step
++        self.next_step += 1
++        self.nodeidx = 0
++
++        # are we allowed to attempt whitespace here?
++        self.can_try_space_idx = 0 if allowspace else None
++
++    def _addnode(self, node_, stream, name, append):
++        assert isinstance(node_, Node)
++        self._preview = None
++        if self._nodes_keep:
++            self._nodes = self._nodes[0:self._nodes_keep]
++            self._nodes_keep = 0
++        self._nodes.append((node_, name, append))
++        self.tryalternate = None
++
++        # advance our "where" pointer past the end of this node so that we
++        # match a new part of the stream
++        node_end = (node_.line_end, node_.char_end)
++        self.where_end = node_end
++        self.where = stream.advance(node_end, 1)
++        self.match_length += node_.node_length
++
++        node_faults = node_.getfaults()
++        if node_faults:
++            self.addfaults(node_faults)
++        elif hasattr(self, 'score'):
++            # reset our score anyway
++            del self.score
++
++    def addfaults(self, faults):
++        # the _faults list is shared with new clones, so we alway make a new
++        # copy before modifying it
++        self._faults = self._faults[:]
++        self._faults.extend(faults)
++        if hasattr(self, 'score'):
++            del self.score
++
++    def clone(self, *, tryalternate=None):
++        new = self.__class__(self.next_step,
++                             where=self.where,
++                             nodeidx=self.nodeidx,
++                             can_try_space_idx=self.can_try_space_idx)
++        new.match_length = self.match_length
++        new.where_end = self.where_end
++        new._faults = self._faults
++        new._preview = self._preview
++        new.origin = self.origin[:]
++        if len(self._nodes):
++            new._nodes = self._nodes
++
++            # since both candidates now have a reference to the same list, we
++            # need to tell each of them to copy-on-write
++            new._nodes_keep = len(self._nodes)
++            self._nodes_keep = len(self._nodes)
++
++        if tryalternate is None:
++            new.tryalternate = self.tryalternate
++        elif tryalternate is False:
++            new.tryalternate = None
++            new.nodeidx = 0
++        else:
++            new.tryalternate = tryalternate
++            new.nodeidx = 0
++        return new
++
++    def _get_score(self):
++        # NOTE: higher scores make a candidate *less* desirable
++        return (
++            self._total_faults(),
++            0 if self.tryalternate is None else 1,
++            0 - (self.match_length + (0 if self._preview is None
++                                      else self._preview[1])),
++            self.next_step,
++            self.nodeidx,
++            -1 if self.can_try_space_idx is None else self.can_try_space_idx,
++        )
++
++    def hasfaults(self):
++        return len(self._faults) or (self._preview and len(self._preview[0]))
++
++    def createnode(self, baseitem):
++        assert len(self._nodes)
++        assert self.where_end is not None
++        n = Fork(baseitem,
++                 start=self.where_start,
++                 end=self.where_end,
++                 length=self.match_length)
++        for child, name, append in self._nodes:
++            n.addchild(child, name, append)
++        if self._faults:
++            n.addfaults(self._faults)
++        return n
+diff --git a/predator/io.py b/predator/io.py
+index 46d875c..f5447e1 100644
+--- a/predator/io.py
++++ b/predator/io.py
+@@ -1,12 +1,20 @@
+-from predator.common import LINEBREAK_RE
++from predator.common import LINEBREAK_RE, WORD_RE, CachedProperties
++from predator.nodes import Node
+ 
+ 
+-class InputStream:
++class InputStream(CachedProperties):
+     """
+     InputStream is an abstraction layer around a stream of text which allows
+     inspecting the contents of the text in structured ways.
+     """
++    _cached_properties = {
++        '_words': '_get_words',
++    }
++
+     def __init__(self, data):
++        # cache of grammar items that matched at particular locations
++        self._matches = {}
++        self._candidates = {}
+         self._lines = LINEBREAK_RE.split(data)
+ 
+     @classmethod
+@@ -14,3 +22,104 @@ class InputStream:
+         # FIXME: this is not memory efficient
+         with open(path, 'rU') as f:
+             return class_(f.read())
++
++    def _get_words(self):
++        words = {}
++        for lineidx in range(len(self._lines)):
++            linedata = self._lines[lineidx]
++            for m in WORD_RE.finditer(linedata):
++                words[(lineidx + 1, m.start())] = m.group()
++        return words
++
++    def peek(self, where, len_):
++        linenr, charidx = where
++        return self._lines[linenr-1][charidx:(charidx + len_)]
++
++    def seeword(self, word, where):
++        wordhere = self._words.get(where)
++        if wordhere == word:
++            return wordhere
++        return False
++
++    def getregex(self, regex, where):
++        """
++        Note - the current implementation of getregex means you can't have a
++        regex that spans multiple lines
++        """
++        # TODO: what happens if linenr is past the end of the input stream? Can
++        # this ever happen?
++        linenr, charidx = where
++        m = regex.match(self._lines[linenr - 1], charidx)
++        if not m:
++            return False
++        match = m.group()
++        assert len(match), "Refusing to consume a regex that matches nothing"
++        return match
++
++    def iseol(self, where):
++        linenr, charidx = where
++        linelen = len(self._lines[linenr - 1])
++        assert charidx <= linelen
++        return charidx == linelen
++
++    def advance(self, where, len_):
++        linenr, charidx = where
++        linelen = len(self._lines[linenr - 1])
++
++        if charidx == linelen:
++            assert len_ == 1
++
++            # if `where` is already pointing at the last linenr, we can't
++            # advance
++            if linenr == len(self._lines):
++                return None
++
++            # advance to the start of the next line
++            return linenr + 1, 0
++
++        moveto = charidx + len_
++        assert charidx < linelen
++        assert moveto <= linelen
++        return linenr, moveto
++
++    def getmatch(self, item, where, idx):
++        linenr, charidx = where
++
++        # find matches for this item class
++        matches = self._matches.setdefault(item, {})
++
++        # limit to only matches at this exact position
++        matches_here = matches.setdefault(linenr, {}).setdefault(charidx, [])
++
++        # does the match we want exist?
++        if idx < len(matches_here):
++            return matches_here[idx]
++
++        # NOTE: the dict will often have None instead of a Node, so we have to
++        # return False as our "we haven't computed this yet" value
++        return False
++
++    def setmatch(self, item, where, idx, node_):
++        assert node_ is None or isinstance(node_, Node)
++        linenr, charidx = where
++
++        # find matches for this item class
++        item_matches = self._matches.setdefault(item, {})
++
++        # find/create the list containing only matches at this exact position
++        matches_here = (item_matches.setdefault(linenr, {})
++                        .setdefault(charidx, []))
++
++        # NOTE: we have an idx but we will never receive the matches out of
++        # order
++        assert idx == len(matches_here)
++        matches_here.append(node_)
++
++    def getcandidates(self, item, where):
++        linenr, charidx = where
++        my_candidates = self._candidates.setdefault(item, {})
++        ret = my_candidates.setdefault(linenr, {}).get(charidx)
++        if ret is None:
++            ret = list(item.getstartingcandidates(where))
++            self._candidates[item][linenr][charidx] = ret
++        return ret
+diff --git a/predator/nodes.py b/predator/nodes.py
+index 2f61751..642325a 100644
+--- a/predator/nodes.py
++++ b/predator/nodes.py
+@@ -2,15 +2,100 @@ class Node:
+     """
+     Base class for the real node classes (Forks and Tips).
+     """
++    def __init__(self, item, *, start, end, length):
++        self.node_name = item.item_name
++        self.node_length = length
++        self.line_start, self.char_start = start
++        self.line_end, self.char_end = end
+ 
+ 
+ class Tip(Node):
+     """
+     A member of the syntax tree which doesn't have any children.
+     """
++    def __init__(self, item, *, where, text):
++        start = where
++        end = where[0], (where[1] + len(text) - 1)
++        super().__init__(item, start=start, end=end, length=len(text))
++        self.node_text = text
++
++    def __repr__(self):
++        what = self.node_name or ''
++        if what:
++            what = '[{}]'.format(what)
++        linenr = 'line {} [{}:{}]'.format(
++            self.line_start, self.char_start,
++            len(self.node_text))
++        txt = self.node_text
++        if len(txt) > 20:
++            txt = '{}...'.format(txt[0:17])
++        return '<{}{} from {} {}>'.format(self.__class__.__name__,
++                                          what, linenr, repr(txt))
++
++    def getfaults(self):
++        # Tip nodes are incapable of having errors
++        return []
++
++    def tostring(self):
++        return self.node_text
+ 
+ 
+ class Fork(Node):
+     """
+     A member of the syntax tree which may have children.
+     """
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        self._children = []
++        self._named = {}
++        self._faults = []
++
++    def __repr__(self):
++        what = self.node_name or ''
++        if what:
++            what = '[{}]'.format(what)
++        if self.line_start == self.line_end:
++            linenr = 'line {} [{}:{}]'.format(
++                self.line_start, self.char_start,
++                (1 + self.char_end - self.char_start))
++        else:
++            linenr = 'lines {}-{}'.format(self.line_start, self.line_end)
++        return '<{}{} from {}>'.format(self.__class__.__name__,
++                                       what, linenr)
++
++    def nochild(self, child_name, many):
++        assert child_name not in self._named
++        self._named[child_name] = [] if many else None
++
++    def addchild(self, child, child_name, append):
++        assert isinstance(child, Node)
++        self._children.append(child)
++        if not child_name:
++            return
++        if append:
++            store = self._named.setdefault(child_name, [])
++            # FIXME: we need something better than just an assertion to tell
++            # people when they've tried to append over a child_name that isn't
++            # a list already
++            assert isinstance(store, list)
++            store.append(child)
++        else:
++            # FIXME: this also needs better error reporting than just an
++            # assertion
++            assert child_name not in self._named
++            self._named[child_name] = child
++
++    def addfaults(self, faults):
++        self._faults = list(faults)
++
++    def getfaults(self):
++        return self._faults
++
++    def tostring(self):
++        ret = []
++        for child in self._children:
++            ret.append(child.tostring())
++        return "".join(ret)
++
++    def __getitem__(self, child_name):
++        return self._named[child_name]
+diff --git a/predator/predator1grammar.py b/predator/predator1grammar.py
+new file mode 100644
+index 0000000..8cdf487
+--- /dev/null
++++ b/predator/predator1grammar.py
+@@ -0,0 +1,95 @@
++from predator.grammar import (Choice, Linebreak, Literal, Regex, Sequence,
++                              Whitespace, Word)
++
++ws = Whitespace()
++
++comment = Sequence('comment', spaces=False)
++comment.additem(Literal('#'))
++comment.additem(Regex(None, r'.+$'), 'comment_content', optional=True)
++comment.additem(Linebreak())
++ws.addwhitespaceitem(comment)
++
++doctype = Sequence("doctype", spaces=False)
++doctype.additem(Literal("predator/1.0"))
++doctype.additem(Linebreak())
++
++name = Regex('name', r'\b[A-Za-z_][A-Za-z_0-9]*\b')
++
++literal = Regex('literal', r"'(\\[\'rnt\\]|[^\'])+'")
++word = Regex('word', r'"\w+"')
++regex = Sequence('regex', spaces=False)
++regex.additem(Literal('/'))
++regex.additem(Regex(None, r'(\\.|[^\/\r\n])+'), 'regex_pattern')
++regex.additem(Literal('/'))
++
++repeat = Choice('repeat')
++# match exactly 0 or 1 of the following
++repeat.addchoice(Word("maybe"))
++# match 1 or more
++repeat.addchoice(Word("many"))
++# match 0 or more
++repeat.addchoice(Sequence(None, items=[Word("maybe"), Word("many")]))
++
++alias1 = Sequence('alias1', items=[Word("as"), name])
++aliasn = Sequence('aliasn', items=[Word("into"), name])
++
++single = Sequence('single')
++single.additem(repeat, 'single_repeat', optional=True)
++single.additem(Choice(choices=[literal, regex, name, word]), 'single_what')
++single.additem(Choice(choices=[alias1, aliasn]), "single_alias", optional=True)
++
++sequence = Sequence('sequence')
++sequence.additem(single, 'sequence_items', many=True, append=True)
++
++# forward declaration
++group = Sequence('group')
++
++choice = Sequence('choice')
++choice.additem(Choice(choices=[sequence, group]), 'choice_items', append=True)
++sub = Sequence(None)
++sub.additem(Word("or"))
++sub.additem(Choice(choices=[sequence, group]), 'choice_items', append=True)
++# NOTE: 'flatten' here means make the named children of that item my children
++# instead
++choice.additem(sub,
++               optional=True, many=True, flatten=['choice_items'])
++
++group.additem(Choice(choices=[repeat, Word("nospace")]), 'group_opt',
++              optional=True)
++group.additem(Literal('('))
++group.additem(choice, 'group_inner')
++group.additem(Literal(')'))
++
++declaration = Sequence('declaration')
++declaration.additem(name, 'decl_name')
++declaration.additem(Literal(':'))
++# declaration may start with either the is_whitespace or is_leader options
++declaration.additem(
++    Choice(choices=[Word("is_whitespace"), Word("is_leader")]),
++    'decl_option',
++    optional=True)
++# you can also use the nospace option here
++declaration.additem(Word("nospace"), 'decl_nospace', optional=True)
++# the declaration ends with a single choice
++declaration.additem(choice, 'decl_choice')
++declaration.additem(Literal(';'))
++
++export = Sequence('export')
++export.additem(Word("export"))
++export.additem(name, 'export_names', many=True, append=True)
++export.additem(Literal(';'))
++
++body = Sequence('body')
++body.additem(declaration, 'body_declarations',
++             many=True, optional=True, append=True)
++body.additem(export, 'body_exports', many=True, optional=True, append=True)
++
++# syntax file will always start with 'predator/1.0'
++document = Sequence('document', spaces=False)
++document.additem(doctype, 'doc_doctype')
++document.additem(body, 'doc_body')
++document.initleader(ws)
++
++exports = dict(document=document)
++
++__all__ = ["document", "exports"]
+diff --git a/python.syn b/python.syn
+new file mode 100644
+index 0000000..964dbec
+--- /dev/null
++++ b/python.syn
+@@ -0,0 +1,155 @@
++predator/1.0
++
++NAME {
++	(("a-z"|"A-Z"|'_')("a-z"|"A-Z"|"0-9"|'_')*)
++}
++
++funcdef {
++	('def' NAME parameters ['->' test] ':' suite)
++	beginscope
++}
++
++single_input:
++	(NEWLINE, simple_stmt, compound_stmt NEWLINE)
++
++file_input:
++	(NEWLINE | stmt)* ENDMARKER
++eval_input:
++	testlist NEWLINE* ENDMARKER
++
++decorator: '@' dotted_name [ '(' [arglist] ')' ] NEWLINE
++decorators: decorator+
++decorated: decorators (classdef | funcdef | async_funcdef)
++
++async_funcdef: ASYNC funcdef
++
++parameters: '(' [typedargslist] ')'
++typedargslist: (tfpdef ['=' test] (',' tfpdef ['=' test])* [',' [
++        '*' [tfpdef] (',' tfpdef ['=' test])* [',' ['**' tfpdef [',']]]
++      | '**' tfpdef [',']]]
++  | '*' [tfpdef] (',' tfpdef ['=' test])* [',' ['**' tfpdef [',']]]
++  | '**' tfpdef [','])
++tfpdef: NAME [':' test]
++varargslist: (vfpdef ['=' test] (',' vfpdef ['=' test])* [',' [
++        '*' [vfpdef] (',' vfpdef ['=' test])* [',' ['**' vfpdef [',']]]
++      | '**' vfpdef [',']]]
++  | '*' [vfpdef] (',' vfpdef ['=' test])* [',' ['**' vfpdef [',']]]
++  | '**' vfpdef [',']
++)
++vfpdef: NAME
++# test
++
++stmt: simple_stmt | compound_stmt
++simple_stmt: small_stmt (';' small_stmt)* [';'] NEWLINE
++small_stmt:
++	(expr_stmt | del_stmt | pass_stmt | flow_stmt | import_stmt | global_stmt | nonlocal_stmt | assert_stmt)
++}
++expr_stmt: testlist_star_expr (annassign | augassign (yield_expr|testlist) |
++                     ('=' (yield_expr|testlist_star_expr))*)
++annassign: ':' test ['=' test]
++testlist_star_expr: (test|star_expr) (',' (test|star_expr))* [',']
++augassign: ('+=' | '-=' | '*=' | '@=' | '/=' | '%=' | '&=' | '|=' | '^=' |
++            '<<=' | '>>=' | '**=' | '//=')
++# For normal and annotated assignments, additional restrictions enforced by the interpreter
++del_stmt: 'del' exprlist
++pass_stmt: 'pass'
++flow_stmt: break_stmt | continue_stmt | return_stmt | raise_stmt | yield_stmt
++break_stmt: 'break'
++continue_stmt: 'continue'
++return_stmt: 'return' [testlist]
++yield_stmt: yield_expr
++raise_stmt: 'raise' [test ['from' test]]
++import_stmt: import_name | import_from
++import_name: 'import' dotted_as_names
++# note below: the ('.' | '...') is necessary because '...' is tokenized as ELLIPSIS
++import_from: ('from' (('.' | '...')* dotted_name | ('.' | '...')+)
++              'import' ('*' | '(' import_as_names ')' | import_as_names))
++import_as_name: NAME ['as' NAME]
++dotted_as_name: dotted_name ['as' NAME]
++import_as_names: import_as_name (',' import_as_name)* [',']
++dotted_as_names: dotted_as_name (',' dotted_as_name)*
++dotted_name: NAME ('.' NAME)*
++global_stmt: 'global' NAME (',' NAME)*
++nonlocal_stmt: 'nonlocal' NAME (',' NAME)*
++assert_stmt: 'assert' test [',' test]
++
++compound_stmt: if_stmt | while_stmt | for_stmt | try_stmt | with_stmt | funcdef | classdef | decorated | async_stmt
++async_stmt: ASYNC (funcdef | with_stmt | for_stmt)
++if_stmt: 'if' test ':' suite ('elif' test ':' suite)* ['else' ':' suite]
++while_stmt: 'while' test ':' suite ['else' ':' suite]
++for_stmt: 'for' exprlist 'in' testlist ':' suite ['else' ':' suite]
++try_stmt: ('try' ':' suite
++           ((except_clause ':' suite)+
++            ['else' ':' suite]
++            ['finally' ':' suite] |
++           'finally' ':' suite))
++with_stmt: 'with' with_item (',' with_item)*  ':' suite
++with_item: test ['as' expr]
++# NB compile.c makes sure that the default except clause is last
++except_clause: 'except' [test ['as' NAME]]
++suite: simple_stmt | NEWLINE INDENT stmt+ DEDENT
++
++test: or_test ['if' or_test 'else' test] | lambdef
++test_nocond: or_test | lambdef_nocond
++lambdef: 'lambda' [varargslist] ':' test
++lambdef_nocond: 'lambda' [varargslist] ':' test_nocond
++or_test: and_test ('or' and_test)*
++and_test: not_test ('and' not_test)*
++not_test: 'not' not_test | comparison
++comparison: expr (comp_op expr)*
++# <> isn't actually a valid comparison operator in Python. It's here for the
++# sake of a __future__ import described in PEP 401 (which really works :-)
++comp_op: '<'|'>'|'=='|'>='|'<='|'<>'|'!='|'in'|'not' 'in'|'is'|'is' 'not'
++star_expr: '*' expr
++expr: xor_expr ('|' xor_expr)*
++xor_expr: and_expr ('^' and_expr)*
++and_expr: shift_expr ('&' shift_expr)*
++shift_expr: arith_expr (('<<'|'>>') arith_expr)*
++arith_expr: term (('+'|'-') term)*
++term: factor (('*'|'@'|'/'|'%'|'//') factor)*
++factor: ('+'|'-'|'~') factor | power
++power: atom_expr ['**' factor]
++atom_expr: [AWAIT] atom trailer*
++atom: ('(' [yield_expr|testlist_comp] ')' |
++       '[' [testlist_comp] ']' |
++       '{' [dictorsetmaker] '}' |
++       NAME | NUMBER | STRING+ | '...' | 'None' | 'True' | 'False')
++testlist_comp: (test|star_expr) ( comp_for | (',' (test|star_expr))* [','] )
++trailer: '(' [arglist] ')' | '[' subscriptlist ']' | '.' NAME
++subscriptlist: subscript (',' subscript)* [',']
++subscript: test | [test] ':' [test] [sliceop]
++sliceop: ':' [test]
++exprlist: (expr|star_expr) (',' (expr|star_expr))* [',']
++testlist: test (',' test)* [',']
++dictorsetmaker: ( ((test ':' test | '**' expr)
++                   (comp_for | (',' (test ':' test | '**' expr))* [','])) |
++                  ((test | star_expr)
++                   (comp_for | (',' (test | star_expr))* [','])) )
++
++classdef: 'class' NAME ['(' [arglist] ')'] ':' suite
++
++arglist: argument (',' argument)*  [',']
++
++# The reason that keywords are test nodes instead of NAME is that using NAME
++# results in an ambiguity. ast.c makes sure it's a NAME.
++# "test '=' test" is really "keyword '=' test", but we have no such token.
++# These need to be in a single rule to avoid grammar that is ambiguous
++# to our LL(1) parser. Even though 'test' includes '*expr' in star_expr,
++# we explicitly match '*' here, too, to give it proper precedence.
++# Illegal combinations and orderings are blocked in ast.c:
++# multiple (test comp_for) arguments are blocked; keyword unpackings
++# that precede iterable unpackings are blocked; etc.
++argument: ( test [comp_for] |
++            test '=' test |
++            '**' test |
++            '*' test )
++
++comp_iter: comp_for | comp_if
++comp_for: [ASYNC] 'for' exprlist 'in' or_test [comp_iter]
++comp_if: 'if' test_nocond [comp_iter]
++
++# not used in grammar, but may appear in "node" passed from Parser to Compiler
++encoding_decl: NAME
++
++yield_expr: 'yield' [yield_arg]
++yield_arg: 'from' test | testlist
+diff --git a/setup.py b/setup.py
+new file mode 100644
+index 0000000..2173ee0
+--- /dev/null
++++ b/setup.py
+@@ -0,0 +1,34 @@
++#from Cython.Build import cythonize
++from setuptools import find_packages, setup
++#from setuptools.extension import Extension
++
++#extensions = [
++    #Extension(
++        #'predator.*',
++        #['predator/*.pyx'],
++    #)
++#]
++
++setup(
++    name='predator',
++    description='Code parsing library',
++    author='Peter Hodge',
++    license='MIT',
++    classifiers=[
++        'Intended Audience :: Developers',
++        'License :: OSI Approved :: MIT License',
++    ],
++    #keywords='dotfiles environment configuration tools utilities automation',
++    packages=['predator'] + ['predator.{}'.format(p) for p in find_packages('predator')],
++    install_requires=[],
++    test_requires=[""],
++    entry_points={
++        #'console_scripts': ['homely=homely._cli:main'],
++    },
++    # automatic version number using setuptools_scm
++    #setup_requires=['setuptools_scm'],
++    #use_scm_version={"write_to": 'homely/__init__.py'},
++
++    # cython!
++    #ext_modules = cythonize(extensions),
++)
+diff --git a/test.php b/test.php
+new file mode 100644
+index 0000000..efaa7c0
+--- /dev/null
++++ b/test.php
+@@ -0,0 +1,6 @@
++<?php
++
++echo '2 ** 2 = ', str_replace("\n", "\n\t", var_export(2 ** 2, 1)), "\n";
++echo '2 ** 1 ** 2 = ', str_replace("\n", "\n\t", var_export(2 ** 1 ** 2, 1)), "\n";
++echo '2 ** (1**2) = ', str_replace("\n", "\n\t", var_export(2 ** (1**2), 1)), "\n";
++echo '(2**1) ** 2 = ', str_replace("\n", "\n\t", var_export((2**1) ** 2, 1)), "\n";
+diff --git a/tests/dotsdashes.py b/tests/dotsdashes.py
+new file mode 100644
+index 0000000..b0e5a7a
+--- /dev/null
++++ b/tests/dotsdashes.py
+@@ -0,0 +1,13 @@
++from predator.grammar import Literal, Sequence
++
++dots = Sequence("dots", spaces=False)
++dots.additem(Literal('('))
++dots.additem(Literal('.'), many=True)
++dots.additem(Literal(')'))
++dashes = Sequence("dashes", spaces=False)
++dashes.additem(Literal('['))
++dashes.additem(Literal('-'), many=True)
++dashes.additem(Literal(']'))
++body = Sequence('body', spaces=False)
++body.additem(dots)
++body.additem(dashes)
+diff --git a/tests/test_010_grammar_construction.py b/tests/test_010_grammar_construction.py
+index e2e5df1..7691a54 100644
+--- a/tests/test_010_grammar_construction.py
++++ b/tests/test_010_grammar_construction.py
+@@ -197,6 +197,12 @@ def test_construct_sequence():
+     s.additem(Literal('!'), optional=True)
+ 
+ 
++def test_leadership():
++    """
++    test that becomeleader() sets the is_leader property correctly.
++    """
++
++
+ def test_construct_whitespace():
+     from predator.grammar import (Literal, Linebreak, Regex, Sequence,
+                                   Whitespace, Word, Choice)
+@@ -244,6 +250,11 @@ def test_construct_whitespace():
+     assert w1.is_white and w2.is_white
+ 
+ 
++def test_construct_everything():
++    return  # TODO: remove me
++    assert False, 'Test is unfinished'
++
++
+ def _checkrepr(item, lookfor):
+     """
+     Checks that a grammar item's repr() is sane.
+diff --git a/tests/test_030_yielding_parser.py b/tests/test_030_yielding_parser.py
+new file mode 100644
+index 0000000..cf498c0
+--- /dev/null
++++ b/tests/test_030_yielding_parser.py
+@@ -0,0 +1,5 @@
++def _get_grammar():
++    from predator.grammar import Sequence
++    body = Sequence('the_body')
++    body.initleader(None)
++    return body
+diff --git a/tests/test_pred1grammar.py b/tests/test_pred1grammar.py
+new file mode 100644
+index 0000000..6b14c02
+--- /dev/null
++++ b/tests/test_pred1grammar.py
+@@ -0,0 +1,99 @@
++# TODO: remove this hack when I have a venv setup for predator
++from os.path import dirname
++
++import pytest  # noqa
++
++
++def flatten(data):
++    lines = data.split('\n')
++
++    # if the first line is a blank, strip it off
++    if lines[0] == '':
++        lines = lines[1:]
++
++    # work out what the minimum indent is ... note this only works for spaces
++    minindent = 0
++    for l in lines:
++        level = minindent if minindent and l.startswith(' ' * minindent) else 0
++        if not len(l):
++            continue
++        while level < len(l):
++            if l[level] == ' ':
++                level += 1
++            else:
++                break
++        if level < minindent:
++            minindent = level
++
++    # reconstruct data by putting all the lines back
++    shorter = []
++    for l in lines:
++        shorter.append(l[level:])
++
++    return '\n'.join(shorter)
++
++
++def assert_where(node_, byte_start, byte_end, line_start, line_end):
++    assert node_.byte_start == byte_start
++    assert node_.byte_end == byte_end
++    assert node_.line_start == line_start
++    assert node_.line_end == line_end
++
++
++def test_empty_doc():
++    from predator.predator1grammar import document
++    from predator.io import InputStream
++
++    # make sure exception is reasonable when there is no input
++    # TODO: put this back
++    if False:
++        correct, gen = document.parseall(InputStream(""))
++        assert correct is None
++        best = gen.send(None)
++        faults = best.getfaults()
++        assert len(faults)
++        for f in faults:
++            import pprint
++            print('f = ' + pprint.pformat(f))  # noqa TODO
++
++    # test a document that has a doctype but no imports or statements
++    empty_doc = """
++    predator/1.0
++    """
++    return
++    correct, gen = document.parseall(InputStream(flatten(empty_doc)))
++    assert_where(doc, 0, 12, 1, 1)
++    assert doc.byte_start == 0
++    assert doc.byte_end == 12
++    assert doc.line_start == 1
++    assert doc.line_end == 2
++
++    # test a document that is technically correct but has a not-allowed empty
++    # line at the start
++    #empty_doc = """
++    #predator/1.0
++    #"""
++    #correct, gen = document.parseall(InputStream(flatten(empty_doc)))
++    #assert_where(doc, 0, 12, 1, 1)
++    #assert doc.byte_start == 0
++    #assert doc.byte_end == 12
++    #assert doc.line_start == 1
++    #assert doc.line_end == 2
++
++
++def test_grammar_definition():
++    """
++    Load the predator1.syn grammar and ensure it matches our manually
++    constructed grammar from predator.predator1grammar
++    """
++    import predator.predator1grammar
++    import predator.grammar
++    from predator.io import InputStream
++    path = dirname(dirname(__file__)) + '/predator-1.0.pred'
++    stream = InputStream.fromfile(path)
++    gen = predator.predator1grammar.document.parseall(stream)
++    node_ = gen.send(None)
++    assert node_ is not None
++
++    # generate new grammar objects from the parsed file
++    genleader, genexports = predator.grammar.generate(node_)
+diff --git a/tests/test_predator1.py b/tests/test_predator1.py
+new file mode 100644
+index 0000000..cd310d2
+--- /dev/null
++++ b/tests/test_predator1.py
+@@ -0,0 +1,50 @@
++from os.path import dirname
++
++import pytest  # noqa
++
++PRED1_GRAMMAR_PATH = dirname(dirname(__file__)) + '/predator-1.0.pred'
++
++
++def _get_tree():
++    """
++    Use the grammar in predator1grammar.py to construct nodes and return them.
++    """
++    from predator.io import InputStream
++    import predator.predator1grammar
++
++    stream = InputStream.fromfile(PRED1_GRAMMAR_PATH)
++    generator = predator.predator1grammar.leader.parseall(stream)
++    correct = generator.send(None)
++    if correct:
++        return correct
++    next_best = generator.send(None)
++    messages = [e.totext() for e in next_best.geterrors()]
++    raise Exception("; ".join(messages))
++
++
++def test_spec_to_nodes_and_back():
++    """
++    Use the manually constructed grammar objects in predator1grammar.py to
++    parse the predator-1.0.pred grammar into nodes, then make sure the nodes
++    can be turned back into the original text they came from.
++    """
++    root = _get_tree()
++
++    with open(PRED1_GRAMMAR_PATH) as f:
++        assert root.tostring() == f.read()
++
++
++def test_grammar_reconstruction():
++    """
++    Test that generating grammar objects from the predator 1.0 spec will are
++    identical to the manually constructed grammar.
++    """
++    import predator.grammar
++
++    root = _get_tree()
++
++    # generate new grammar objects from the parsed file
++    genleader, genexports = predator.grammar.generate(root)
++
++    assert genleader == predator.predator1grammar.leader
++    assert genexports == predator.predator1grammar.exports
+diff --git a/tests/test_predator1errors.py b/tests/test_predator1errors.py
+new file mode 100644
+index 0000000..34c3155
+--- /dev/null
++++ b/tests/test_predator1errors.py
+@@ -0,0 +1,14 @@
++# TODO: GRAMMAR AUTHORS
++#
++# add tests for what happens in these common scenarios
++# - someone creates a grammar with ambiguous precedence but doesn't specify
++#   resolution order
++# - combining things in inappropriate ways? (this probably needs expanding)
++
++
++# TODO: GRAMMAR USERS
++#
++# add tests for what happens when someone using a predator-based grammar to
++# parse something encounters these common scenarios
++# - the leader can't figure out where to start
++# - syntax errors
+diff --git a/tests/test_yielding_parser.py b/tests/test_yielding_parser.py
+new file mode 100644
+index 0000000..f92eefb
+--- /dev/null
++++ b/tests/test_yielding_parser.py
+@@ -0,0 +1,135 @@
++from predator.grammar import Literal, Regex, Sequence, Whitespace, Word
++
++# TODO:
++# construct a simple grammar which reads:
++#
++# <name> = <int> + <int>;
++#
++# print <name>;
++number = Regex("number", r"\b-?[1-9]\d*\b")
++varname = Regex("varname", r"\b[A-Za-z_][A-Za-z0-9_]*\b")
++assignline = Sequence("assignline")
++assignline.additem(varname, "varname")
++assignline.additem(Literal("="))
++assignline.additem(number, "number1")
++assignline.additem(Literal("+"))
++assignline.additem(number, "number2")
++assignline.additem(Literal(";"))
++printline = Sequence("printline")
++printline.additem(Word("print"))
++printline.additem(varname, "varname")
++printline.additem(Literal(";"))
++ws = Whitespace()
++body = Sequence("body", spaces=False)
++# FIXME: we should have some sort of sanity check that ensures the whitespace
++# item is set for the top-level item
++#body.setwhitespace(ws)
++body.additem(ws, None, optional=True, many=True)
++body.additem(assignline, "assignlines", many=True, append=True)
++body.additem(ws, None, optional=True, many=True)
++body.additem(printline, "printlines", many=True, append=True)
++body.additem(ws, None, optional=True, many=True)
++
++
++good = """
++foo = 5 + 5;
++bar = 7 + 7;
++print foo;
++print bar;
++"""
++
++
++def test_recursion_not_allowed():
++    from predator.io import InputStream
++    dots = Sequence("dots", spaces=False)
++    dots.additem(Literal('.'), many=True)
++    dashes = Sequence("dashes", spaces=False)
++    dashes.additem(Literal('-'), many=True)
++    body = Sequence('body', spaces=False)
++    body.additem(dots)
++    body.additem(dashes)
++
++    gen = body.parseall(InputStream("xxxxx"))
++    first = gen.send(None)
++    assert first is None
++    # this test doesn't make an assertion about whether the body item will be
++    # able to yield another node with faults
++
++
++def test_partial_yielding():
++    """
++    Test that yielding of previews works correctly
++    """
++    from predator.io import InputStream
++    from predator.nodes import Node
++    from predator.test.dotsdashes import body
++
++    s = InputStream('(.)[-]')
++    result = body.yieldnode2(s, (1, 0), 0, ignore=set(), quick=True)
++    assert not isinstance(result, Node)
++    assert len(result) == 2
++    assert len(result[0]) or result[1]
++
++
++def test_poor_candidate_advancement():
++    """
++    Test that candidates unlikely to beat the "correct" candidates aren't
++    advanced unnecessarily.
++    """
++    from predator.io import InputStream
++    from predator.test.dotsdashes import body
++    from predator.nodes import Node
++
++    s = InputStream('(.....)[-----]')
++    result = body.yieldnode2(s, (1, 0), 0, ignore=set(), quick=False)
++    assert isinstance(result, Node)
++
++    # look at the matches that were found - there should be none with faults
++    for item, item_matches in s._matches.items():
++        for linenr, line_matches in item_matches.items():
++            for charidx, matches in line_matches.items():
++                for m in matches:
++                    if m is None:
++                        continue
++                    assert not m.getfaults()
++
++    # look at the candidates that were created - none of them should have been
++    # advanced
++    for item, item_candidates in s._candidates.items():
++        for linenr, line_candidates in item_candidates.items():
++            for charidx, candidates in line_candidates.items():
++                for c in candidates:
++                    import pprint
++                    print('item = ' + pprint.pformat(item))  # noqa TODO
++                    import pprint
++                    print('c = ' + pprint.pformat(c))  # noqa TODO
++                    raise Exception("TODO: check them")  # noqa
++
++
++def test_correct_node_is_first():
++    # test that with correct input, the first node yielded by the grammar is
++    # the correct one
++    from predator.io import InputStream
++    gen = body.parseall(InputStream(good))
++    first = gen.send(None)
++    second = gen.send(None)
++    import pprint
++    print('first = ' + pprint.pformat(first))  # noqa TODO
++    import pprint
++    print('second = ' + pprint.pformat(second))  # noqa TODO
++    raise Exception("TODO: finish this")  # noqa
++    print(first)
++
++    # test that if the input is invalid, the first node is None, not a node
++    # with an error.
++    raise Exception("TODO: finish this")  # noqa
++
++
++def zz_test_fewest_errors_first():
++    # test a simple mistake near the end of the input stream is mentioned
++    # before a bunch of bigger mistakes earlier in the file
++    raise Exception("TODO: finish this")  # noqa
++
++    # test a simple mistake near the beginning of the input stream is mentioned
++    # before a bigger mistake at the end
++    raise Exception("TODO: finish this")  # noqa
